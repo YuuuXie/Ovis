@@ -22,6 +22,69 @@ import { recentSshOutput } from "./ssh.ts";
 import { RemoteResponseInvalid, RemoteResponseTooLarge } from "./remote-json.ts";
 
 const MiB = 1024 * 1024;
+describe("remote reuse-only deployment", () => {
+  it.each(["install", "update", "updateBridge", "updateAll", "own"])("refuses the %s entry point before starting remote work", (operation) => {
+    const previous = process.env["OVIS_REMOTE_REUSE_ONLY"];
+    process.env["OVIS_REMOTE_REUSE_ONLY"] = "1";
+    const dir = mkdtempSync(join(tmpdir(), "ovis-reuse-only-"));
+    const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture local offline"); });
+    const runtime = manager["runtime"]({ id: "fixture", name: "fixture", kind: "ssh", enabled: true, state: "connected", target: { destination: "fixture" }, snapshot: null, error: null });
+    runtime.ownOffer = { how: "own", current_version: null, latest_version: null, updatable: true, reason: null };
+    manager["machines"].set("fixture", runtime);
+    const installer = spyOn(manager["installer"], "start").mockImplementation(() => { throw new Error("installer must not run"); });
+    try {
+      const request = () => {
+        if (operation === "install") return manager.install({ destination: "fixture-new" });
+        if (operation === "update") return manager.update("fixture");
+        if (operation === "updateBridge") return manager.updateBridge("fixture");
+        if (operation === "updateAll") return manager.updateAll();
+        return manager["updateOwn"](runtime);
+      };
+      expect(request).toThrow("reuse existing compatible bridges only");
+      expect(installer).not.toHaveBeenCalled();
+      expect(runtime.ownJob).toBeUndefined();
+    } finally {
+      manager.stop();
+      installer.mockRestore();
+      if (previous === undefined) delete process.env["OVIS_REMOTE_REUSE_ONLY"];
+      else process.env["OVIS_REMOTE_REUSE_ONLY"] = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it.each(["absent", "stale", "incompatible", "update", "secret"])("refuses %s bridges before remote changes", async (scenario) => {
+    const previous = process.env["OVIS_REMOTE_REUSE_ONLY"];
+    process.env["OVIS_REMOTE_REUSE_ONLY"] = "1";
+    const dir = mkdtempSync(join(tmpdir(), "ovis-reuse-only-"));
+    const manager = new MachineManager(dir, {} as PushService, new CompletionTracker(null), async () => { throw new Error("fixture local offline"); });
+    const runtime = manager["runtime"]({ id: "fixture", name: "fixture", kind: "ssh", enabled: true, state: "disconnected", target: { destination: "fixture" }, snapshot: null, error: null });
+    runtime.ssh = { run: async () => { throw new Error("Windows has no sh"); }, runPowerShell: async () => "", usedSecret: scenario === "secret", close() {} } as never;
+    const descriptor = { pid: 4242, port: 7317, token: "a".repeat(64), socket_path: "C:\\socket", bridge_protocol: BRIDGE_PROTOCOL,
+      bundle_version: scenario === "incompatible" ? "0" : REMOTE_BUNDLE_VERSION, managed_remote: true };
+    const timer = setTimeout(() => {}, 60_000);
+    const job = { public: { id: "fixture", machine_id: "fixture", target: { destination: "fixture" }, phase: "starting", step: "Starting", challenge: null, ssh_output: null, installations: [], error: null } satisfies SetupJob,
+      abort: new AbortController(), timer, update: scenario === "update", auto: false, stageStartedAt: Date.now(), finished: Promise.resolve() };
+    const mocks = [
+      spyOn(windowsHost, "inspect").mockResolvedValue({ platform: "win32-x64", home: "C:\\Users\\fixture", herdrPath: "C:\\herdr.exe", expectedSocket: descriptor.socket_path,
+        bundleReady: true, bundleOlder: false, descriptors: scenario === "absent" ? [] : [descriptor], runtimeDir: "C:\\runtime", registryDir: "C:\\registry" }),
+      spyOn(windowsHost, "herdrVersion").mockResolvedValue("herdr 0.9.5"),
+      spyOn(windowsHost, "alive").mockResolvedValue(scenario !== "stale"),
+      spyOn(windowsHost, "start").mockResolvedValue(),
+      spyOn(windowsHost, "stop").mockResolvedValue(),
+      spyOn(windowsHost, "installBundle").mockResolvedValue(),
+    ];
+    try {
+      await expect(manager["prepare"](runtime, scenario === "update" ? job : undefined)).rejects.toThrow("reuse existing compatible bridges only");
+      for (const mock of mocks.slice(3)) expect(mock).not.toHaveBeenCalled();
+    } finally {
+      clearTimeout(timer);
+      manager.stop();
+      for (const mock of mocks) mock.mockRestore();
+      if (previous === undefined) delete process.env["OVIS_REMOTE_REUSE_ONLY"];
+      else process.env["OVIS_REMOTE_REUSE_ONLY"] = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 function padded(value: unknown, total: number): { stream: ReadableStream<Uint8Array>; cancelled: Promise<void> } {
   const json = JSON.stringify(value);
   const space = new Uint8Array(64 * 1024).fill(0x20);

@@ -784,12 +784,18 @@ export class MachineManager {
     renameSync(tmp, this.settingsPath);
     return this.settings();
   }
+  private assertRemoteChangesAllowed(): void {
+    if (process.env["OVIS_REMOTE_REUSE_ONLY"] === "1") {
+      throw new MachineActionRequired("This hub is configured to reuse existing compatible bridges only. Remote installation, startup and updates are disabled.", "setup");
+    }
+  }
   /**
    * Update a PC's bridge now, without a dialog: the tap (or the app update) is the approval,
    * and SSH uses the PC's saved key only. A PC that needs a password fails with the reason,
    * and its dialog stays the way in.
    */
   updateBridge(id: string, scheduled = false, expectedRevision?: string): SetupJob {
+    this.assertRemoteChangesAllowed();
     const runtime = this.machines.get(id);
     if (!runtime) throw new Error("PC not found");
     if (runtime.machine.kind === "relay") throw new Error(RELAY_PC_UPDATES);
@@ -807,6 +813,7 @@ export class MachineManager {
     return this.setup({ ...runtime.machine.target!, machine_id: id, update_remote: true }, { auto: true, ...(revision ? { expectedRevision: revision } : {}) });
   }
   update(id: string, shown?: string): { job_id: string } {
+    this.assertRemoteChangesAllowed();
     const runtime = this.machines.get(id);
     if (!runtime) throw new Error("PC not found");
     if (this.updateRunning(runtime)) throw new PcUpdateRefused("This PC is already updating.");
@@ -820,6 +827,7 @@ export class MachineManager {
     return { job_id: this.updateBridge(id, false, shown ?? offer.revision ?? undefined).id };
   }
   install(request: PcInstallRequest, shown?: string): PcInstallJob {
+    this.assertRemoteChangesAllowed();
     if (this.stopped) throw new Error("Server stopping");
     const name = "name" in request ? request.name : undefined;
     if (name !== undefined && (typeof name !== "string" || name.length > 100)) throw new Error("PC name must be at most 100 characters");
@@ -915,6 +923,7 @@ export class MachineManager {
     if (ended) queueMicrotask(() => this.nextOwn());
   }
   updateAll(): PcUpdateAll {
+    this.assertRemoteChangesAllowed();
     const result: PcUpdateAll = { started: [], queued: [], skipped: [] };
     for (const runtime of this.machines.values()) {
       const id = runtime.machine.id;
@@ -1012,6 +1021,7 @@ export class MachineManager {
     });
   }
   private updateOwn(runtime: Runtime, shown?: string): string {
+    this.assertRemoteChangesAllowed();
     const id = randomUUID();
     const abort = new AbortController();
     runtime.ownJob = { id, abort };
@@ -1409,6 +1419,9 @@ export class MachineManager {
       throw new Error(OWN_OVIS_AWAY);
     }
     let update = job?.update === true;
+    if (!descriptor || update || ssh.usedSecret || descriptor.bridge_protocol !== BRIDGE_PROTOCOL || descriptor.bundle_version !== REMOTE_BUNDLE_VERSION) {
+      this.assertRemoteChangesAllowed();
+    }
     let currentBridge: Awaited<ReturnType<MachineManager["verify"]>> | undefined;
     if (descriptor && update && descriptor.bridge_protocol === BRIDGE_PROTOCOL && descriptor.bundle_version === REMOTE_BUNDLE_VERSION) {
       try { currentBridge = await this.verify(ssh, descriptor, expectedSocket); }
