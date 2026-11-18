@@ -2,6 +2,7 @@ import type { WebSocketHandler } from "bun";
 import type { SessionSnapshot } from "../../shared/protocol.ts";
 import type { DeviceStore } from "../devices.ts";
 import { ping } from "../herdr/client.ts";
+import { windowsControlBinary } from "../windows-control.ts";
 import { capabilities } from "../runtime/capabilities.ts";
 import type { PreferenceStore } from "../preferences.ts";
 import { type OmpLookups, OpenCodePromptState, shownPromptText } from "../prompt.ts";
@@ -59,7 +60,9 @@ export function createCore({ options, devices, preferences, usage, usageLogin, b
   const clients = new Set<Client>();
   const present = new Set<Client>();
   let stopped = false;
-  const { attachments, conversations, reconcileOutput, closeAttachment, paneMoved, detachClaimed, dropClaims, sight, poke, drainOutput, terminalFrames } = createTerminalRegistry({ options, clients, stopped: () => stopped, terminalAttach, holdFor, heldRetry, retryFor, relookupFor, holdPending: (owner, paneId) => holdPending(owner, paneId), holdPendingPane: (paneId, fault) => holdPendingPane(paneId, fault), attached: (client, paneId) => attached(client, paneId), transcriptChanged: (paneId) => reconcilePiDeliveries(paneId), inputReady: (paneId) => drainPending(paneId), end: (client, reason) => end(client, reason) });
+  const nativeControl = process.platform === "win32" && capabilities().attach === "pty-cli" && options.terminalAttach === undefined
+    ? (socket: string) => ping(socket).then(windowsControlBinary).catch(() => null) : undefined;
+  const { attachments, conversations, reconcileOutput, closeAttachment, paneMoved, detachClaimed, dropClaims, releaseFit, sight, poke, drainOutput, terminalFrames } = createTerminalRegistry({ options, clients, stopped: () => stopped, terminalAttach, nativeControl, holdFor, heldRetry, retryFor, relookupFor, holdPending: (owner, paneId) => holdPending(owner, paneId), holdPendingPane: (paneId, fault) => holdPendingPane(paneId, fault), attached: (client, paneId) => attached(client, paneId), transcriptChanged: (paneId) => reconcilePiDeliveries(paneId), inputReady: (paneId) => drainPending(paneId), end: (client, reason) => end(client, reason) });
 
   const { serialize, settleAfterTyping, lastTyped, typedInto, inputFrames } = createInputLane({ TYPED_SETTLE_MS, KEY_SETTLE_MS, clients, sight, poke, terminalAttach, terminalAttachKnown: () => terminalAttachKnown, mayType: (client) => mayType(client), authorizeSocket: (client) => authorizeSocket(client) });
 
@@ -78,7 +81,7 @@ export function createCore({ options, devices, preferences, usage, usageLogin, b
     paneMoved: (from, to) => { movePendingPane(from, to); paneMoved(from, to); } });
   const socketHandlers = createSocket({
     herdrFailure: options.herdrFailure,
-    clients, present, stopped: () => stopped, admit, setRole, watchable: () => capabilities().attach === "pty-cli", terminalHistory: () => capabilities().attach !== "pty-cli", terminalModes: () => capabilities().attach === "hc", watchPane, unwatchPane, end, holdPending, attachments, clientSnapshot, herdrLifetime: currentHerdrLifetime, browserSnapshot, countVisit, drainOutput,
+    clients, present, stopped: () => stopped, admit, setRole: (client, mode) => { setRole(client, mode); if (mode === "observe") releaseFit(client); }, watchable: () => capabilities().attach === "pty-cli", terminalHistory: () => capabilities().attach !== "pty-cli", terminalModes: () => capabilities().attach === "hc", watchPane, unwatchPane, end, holdPending, attachments, clientSnapshot, herdrLifetime: currentHerdrLifetime, browserSnapshot, countVisit, drainOutput,
     // each frame type by name, with the handler of the module that owns it: anything else on a frame object never
     // becomes a frame a client can send, and a type named twice fails the build instead of replacing a handler
     frames: {

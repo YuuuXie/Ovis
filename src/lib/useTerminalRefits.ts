@@ -126,7 +126,8 @@ export function useTerminalRefits(deps: TerminalRefitsDeps): void {
       const shown = termRef.current;
       if (shown && !shown.hasSelection()) shown.scrollToBottom();
     };
-    if (observeRef.current || fixedGridRef.current) { landAtBottom(); return; }
+    const reclaim = paneRef.current && socketRef.current?.canRequestWindowsFit(paneRef.current);
+    if (observeRef.current || (fixedGridRef.current && !reclaim)) { landAtBottom(); return; }
     if (keyboardHoldsRef.current(true)) { landAtBottom(); return; }
     const term = termRef.current;
     try {
