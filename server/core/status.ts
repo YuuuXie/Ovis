@@ -961,7 +961,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     return () => clearInterval(timer);
   }))(cardPace);
   const activityTimer = setInterval(() => {
-    if (clients.size) void copilotActivity.tick(cardRoster, () => broadcastAll({ type: "session-changed" }));
+    void copilotActivity.tick(cardRoster, () => broadcastAll({ type: "session-changed" }), clients.size > 0 || machines?.rosterWatched === true);
   }, 3000);
   activityTimer.unref?.();
   plans.start();

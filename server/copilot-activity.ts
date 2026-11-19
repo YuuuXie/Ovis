@@ -45,8 +45,13 @@ export class CopilotActivity {
     }) };
   }
 
-  async tick(roster: Roster, changed: () => void): Promise<void> {
+  async tick(roster: Roster, changed: () => void, watched = true): Promise<void> {
     if (this.stopped || process.platform !== "linux") return;
+    if (!watched) {
+      this.samples.clear();
+      this.reads.clear();
+      return;
+    }
     const panes = roster.all().filter((pane) => pane.agent === "copilot");
     const live = new Set(panes.map((pane) => pane.pane_id));
     for (const id of this.samples.keys()) if (!live.has(id)) this.forget(id);
