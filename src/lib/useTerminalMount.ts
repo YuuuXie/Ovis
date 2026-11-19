@@ -42,7 +42,7 @@ import { adoptPaneGrid, visibleTerminalInputBounds } from "./terminalViewport.ts
 import type { PaneSubmitRetention } from "./paneSubmitRetention.ts";
 import type { ShortcutOverrides } from "./shortcutBindings.ts";
 import { takeTypeAhead, type TypeAheadItem } from "./typeAhead.ts";
-import { RESIZE_SETTLE_MS, RELEASE_AFTER_MS, IDLE_RELEASE_MS, RESUME_INPUT_WAIT_MS, VIEW_BUFFER_MAX, afterSwitch, dropViewChange, holdViews, inUse, connectedSockets, plainError, releaseViews, CONTROL_CHARACTER } from "./paneTerminalShared.ts";
+import { RESIZE_SETTLE_MS, RELEASE_AFTER_MS, IDLE_RELEASE_MS, RESUME_INPUT_WAIT_MS, VIEW_BUFFER_MAX, afterSwitch, dropViewChange, holdViews, inUse, keepsCoreGrid as keptCoreGrid, takeKeptCoreGrid, connectedSockets, plainError, releaseViews, setTerminalTimeout, CONTROL_CHARACTER } from "./paneTerminalShared.ts";
 import { copyOnSelect, herdrUiKnown, loadHerdrUi } from "./herdrUi.ts";
 import { captureForGhostty } from "./ghostty/capture.ts";
 import { holdForPictures } from "./terminalImages.ts";
@@ -408,7 +408,11 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
       fitRef.current = fit;
 
       // A mirror has no cursor; xterm's own rests on the last row with text, which serves the same.
-      const adopted = (): boolean => observeRef.current || fixedGridRef.current || followRef.current;
+      // A page attached without sizing a herdr-core pty (away when it attached, or let go of the size since) draws it in
+      // the pty's grid: in its own, a wrapped row or a taller screen put each redraw in rows the program never drew, and
+      // the old frames stayed on screen. A grid held under the soft keyboard is the keyboard's to give back (keyboardHolds).
+      const keepsCoreGrid = (): boolean => !keyboardHeld && keptCoreGrid(socketRef.current, paneRef.current);
+      const adopted = (): boolean => observeRef.current || fixedGridRef.current || followRef.current || keepsCoreGrid();
       let nativeFitPane: string | null = null;
       const mirrorOnly = (pane: string | null) => mirroredRef.current && (pane === null || nativeFitPane !== pane);
       const scrollableMirror = (): boolean => (fixedGridRef.current || (!!paneRef.current && socket.offersWindowsFit(paneRef.current)))
@@ -438,7 +442,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
       };
       const wideOwner = {};
       const fold = createTerminalFold(term, host, {
-        foreign: () => (fixedGridRef.current || observeRef.current || keyboardHeld) && !followRef.current,
+        foreign: () => (fixedGridRef.current || observeRef.current || keyboardHeld || keepsCoreGrid()) && !followRef.current,
         wrap: () => mirrorWrapRef.current,
         onWide: (wide) => {
           const current = paneRef.current;
@@ -448,7 +452,11 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
           if (!panned) followFold();
           syncInputViewport();
         },
-        onTap: () => { if (activeRef.current && !findOpenRef.current) term.focus(); },
+        onTap: () => {
+          // folded rows are outside xterm's element, where a press takes the pane back (reclaim)
+          reassertIfStaleRef.current();
+          if (activeRef.current && !findOpenRef.current) term.focus();
+        },
         onLink: (target, event) => {
           if (!linkPressed(event)) return false;
           if ("url" in target) {
@@ -947,7 +955,6 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
         const frame = outputFrames.shift();
         if (!frame || disposed) {
           writingOutput = false;
-          if (!disposed && arrowModeCandidate === arrowModeEpoch) arrowModesReady = true;
           return;
         }
         writingOutput = true;
@@ -1034,7 +1041,8 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
           write(data, () => { inFlight--; callback?.(); });
         };
         Object.assign(host, { outputProbe: () => ({ ...term.oscStringState(), parsingReplay, replayOscOpen, retired: writingOutput && parsingOwner !== outputOwner, queued: outputFrames.length, inFlight, peakInFlight, writes, written, frameSettled: frameGateRef.current.current,
-          history: { scrollback: term.options.scrollback ?? 0, length: term.buffer.active.length, viewportY: term.buffer.active.viewportY, baseY: term.buffer.active.baseY } }) });
+          history: { scrollback: term.options.scrollback ?? 0, length: term.buffer.active.length, viewportY: term.buffer.active.viewportY, baseY: term.buffer.active.baseY },
+          grid: { cols: term.cols, rows: term.rows } }) });
       }
 
       // OSC 52: the pane program asked the terminal to set the clipboard - the pty
@@ -1089,8 +1097,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
           && recoveringPane !== parsingModePane) {
           arrowModeEpoch++;
           parsingModeEpoch = arrowModeEpoch;
-          arrowModesReady = false;
-          arrowModeCandidate = arrowModeEpoch;
+          arrowModeWitness = arrowModeEpoch;
         }
         return false;
       }));
@@ -1141,13 +1148,14 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
       ghosttyFaintObserver.observe(host, { childList: true, subtree: true, attributes: true, attributeFilter: ["style"] });
       setConnectedBefore(connectedSockets.has(socket));
       let outputGeneration = 0;
-      // A raw arrow is safe only after this attachment's output has finished parsing in xterm.
-      // Capture this on the Typed item too: input waiting for an attach may flush after the first paint.
-      let arrowModesReady = false;
+      // A raw arrow needs this attachment's output to have shown its DECCKM: only then has the server's attach
+      // (CoreAttachSession) read the program's cursor mode, and it types a lone cursor key in that mode, whatever
+      // xterm still believed when it encoded the key, so output still on its way to xterm holds nothing back.
+      // Captured on the Typed item too: input waiting for an attach may flush after the first paint.
       let arrowModeEpoch = 0;
-      // A witness becomes sendable only after the ordered output queue has drained.
-      let arrowModeCandidate: number | null = null;
-      const invalidateArrowModes = (): void => { arrowModesReady = false; arrowModeCandidate = null; arrowModeEpoch++; };
+      // the epoch of the current attachment's DECCKM witness, null before one
+      let arrowModeWitness: number | null = null;
+      const invalidateArrowModes = (): void => { arrowModeWitness = null; arrowModeEpoch++; };
       let touchWheelDispatching = false;
       // Bumped by readiness receipts: revokes only the proof that queued output is current, never
       // the parse itself (a masked prompt must still keep typing out of every draft).
@@ -1343,10 +1351,6 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
               outputLifetime++;
             }
           }
-      // A raw arrow is safe only after this attachment has parsed an explicit DECCKM set/reset.
-          // Suspend raw sends while these bytes wait for xterm. Keep an established mode witness:
-          // ordinary output does not change DECCKM unless its parsed CSI explicitly does so.
-          arrowModesReady = false;
           const generation = outputGeneration;
           const lifetime = outputLifetime;
           const target = outputTargetRef.current;
@@ -1383,7 +1387,14 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
               showSecret(owner, prompt);
             }
             term.options.disableStdin = observeRef.current || heldRef.current;
-            if (frameGateRef.current.settle(stamp, lifetime === outputLifetime && recoveringPane !== owner && gridMatches())) onInputRowFrameRef.current();
+            if (frameGateRef.current.settle(stamp, lifetime === outputLifetime && recoveringPane !== owner && gridMatches())) {
+              onInputRowFrameRef.current();
+              if (typeof __HERDR_TEST_HOOKS__ === "boolean" && __HERDR_TEST_HOOKS__ && stamp.synchronized && message.flow) {
+                // The write callback has parsed the complete synchronized update in this xterm grid.
+                host.dispatchEvent(new CustomEvent("ovis:test-terminal-frame", { bubbles: true,
+                  detail: { pane: owner, cols: term.cols, rows: term.rows, replay: message.replay === true, stream: message.flow.stream_id } }));
+              }
+            }
           }, false, acknowledge, { pane: owner, generation, lifetime });
         } else if (message.type === "watch-data") {
           if (message.pane_id !== paneRef.current || !releasedRef.current || !watchingRef.current) return;
@@ -1452,7 +1463,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
           followCursor();
         } else if (message.type === "pane-geometry") {
           // observe clients adopt the pty's grid; interact clients drive it and ignore this,
-          // unless the grid is fixed: then nobody here drives it
+          // unless the grid is fixed (nobody here drives it) or a herdr-core pty is kept at another size
           if (message.pane_id !== paneRef.current) return;
           if (message.windows_fit) nativeFitPane = message.pane_id;
           else if (message.fixed) nativeFitPane = null;
@@ -1471,7 +1482,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
           sharedGridRef.current = { cols: message.cols, rows: message.rows };
           // the pty took a new size: herdr may draw the old screen reflowed before the agent redraws (lib/inputRow.ts FrameGate)
           if (!message.fixed && before !== null && (before.cols !== message.cols || before.rows !== message.rows)) frameGateRef.current.reflowed();
-          const drives = !observeRef.current && !fixedGridRef.current && !followRef.current && !chatViewRef.current;
+          const drives = !adopted() && !chatViewRef.current;
           if (drives && keyboardHeld) heldForce = true;
           if (!adoptPaneGrid(term, message, wasFixed, drives && !keyboardHeld)) return;
           panned = false;
@@ -1635,10 +1646,11 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
       host.addEventListener("keydown", onCommandArrow);
       // a key, a chord or text for the pane: sent now, or, when the pane cannot take it, told or held for review
       const sendTyped = (current: string, typed: Typed): void => {
-        // xterm encodes an arrow from its parsed mode, so only one encoded after this attachment's output
-        // parsed may go as text. Logical type-ahead arrows and keys queued before that fence stay named.
+        // An arrow pressed after this attachment showed its DECCKM goes as text, also while output is still on its
+        // way to xterm (#4123): a named key waits out hc's typing quiet period, and so does all typing behind it.
+        // Logical type-ahead arrows and arrows pressed before that witness stay named.
         const rawArrow = typed.arrowModeEpoch !== undefined && typed.arrowModeEpoch !== null
-          && typed.arrowModeEpoch === arrowModeEpoch && arrowModesReady && !writingOutput && outputFrames.length === 0 && socket.typesArrows();
+          && typed.arrowModeEpoch === arrowModeEpoch && socket.typesArrows();
         if (typed.keys !== null && (typed.chord || !rawArrow)) {
           if (socket.sendKeys(current, typed.keys)) return;
           // A named arrow that could not be sent must never fall through as its possibly stale CSI bytes.
@@ -1755,7 +1767,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
         const arrow = chord === null && !pasting && !composingRef.current && !compositionCommitPendingRef.current && key?.startsWith("Arrow")
           ? terminalChord(key, NO_STICKY_MODIFIERS) : null;
         const typed: Typed = { input, keys: arrow !== null ? [arrow] : chord !== null ? [chord] : null, chord: chord !== null, stop: stopKey && input === "\u001b", secret,
-          ...(arrow !== null ? { arrowModeEpoch: arrowModesReady ? arrowModeEpoch : null } : {}), ...(automatic ? { automatic } : {}) };
+          ...(arrow !== null ? { arrowModeEpoch: arrowModeWitness === arrowModeEpoch ? arrowModeEpoch : null } : {}), ...(automatic ? { automatic } : {}) };
         adoptTypeAhead(current);
         // typed into a tab taking its pane back from idleness: it waits for the new attach (never a password)
         if (resumeInput !== null && resumeInput.pane !== current) takeResume();
@@ -1839,7 +1851,7 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
       const observer = new ResizeObserver(() => {
         syncInputViewport();
         if (resizeTimer !== null) window.clearTimeout(resizeTimer);
-        resizeTimer = window.setTimeout(() => {
+        resizeTimer = setTerminalTimeout(() => {
           resizeTimer = null;
           // the grid belongs to the pty while observing, and to herdr when fixed: only the view moves
           // (a soft keyboard opening must not leave the prompt under it)
@@ -2358,7 +2370,8 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
         if (cachedRef.current) { release(); return; }
         const current = paneRef.current;
         if (current && !observeRef.current && !fixedGridRef.current) socket.keepSize(current, document.visibilityState === "hidden");
-        if (releaseAwayRef.current && releaseTimer === null && !releasedRef.current) releaseTimer = window.setTimeout(() => {
+        if (!keyboardHeld && takeKeptCoreGrid(term, socket, current, sharedGridRef.current)) followCursorRef.current();
+        if (releaseAwayRef.current && releaseTimer === null && !releasedRef.current) releaseTimer = setTerminalTimeout(() => {
           if (paneRef.current === current) release();
         }, RELEASE_AFTER_MS);
         if (hiddenOnTouch()) release();
@@ -2437,7 +2450,8 @@ export function useTerminalMount(deps: TerminalMountDeps): void {
         }
         const shared = sharedGridRef.current;
         if (!shared || releasedRef.current || !inUse()) return;
-        if (shared.cols !== term.cols || shared.rows !== term.rows || (paneRef.current && socket.canRequestWindowsFit(paneRef.current))) refit();
+        if ((keepsCoreGrid() && sizesPty()) || shared.cols !== term.cols || shared.rows !== term.rows
+          || (paneRef.current && socket.canRequestWindowsFit(paneRef.current))) refit();
       };
       reassertIfStaleRef.current = reassertIfStale;
       const reclaim = (event: Event): void => {
