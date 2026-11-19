@@ -151,6 +151,9 @@ class ForegroundClient {
         }
         const result = await this.request("connect");
         if (!record(result) || result.protocolVersion !== 3) throw new Unavailable("unsupported_protocol");
+      } catch (error) {
+        this.close(error instanceof Unavailable ? error : new Unavailable("rpc_failed"));
+        throw error;
       } finally { clearTimeout(timer); }
     })();
   }

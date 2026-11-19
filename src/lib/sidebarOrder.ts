@@ -47,12 +47,14 @@ export function isSeenDone(pane: FinishPane, seen: SeenRecord): boolean {
     && pane.finish_id > 0 && (seen[pane.pane_id] ?? 0) >= pane.finish_id;
 }
 
+export function copilotBadge(pane: FinishPane): "working" | "idle" | undefined {
+  if (pane.background_wait || pane.copilot_processing === undefined || !["working", "idle", "unknown"].includes(pane.agent_status)) return undefined;
+  return pane.copilot_processing ? "working" : "idle";
+}
+
 export function shownStatus(pane: FinishPane, seen: SeenRecord | null): AgentStatus | undefined {
   if (pane.background_wait) return paneStatus(pane);
-  if (pane.copilot_processing !== undefined && ["working", "idle", "unknown"].includes(pane.agent_status)) {
-    return pane.copilot_processing ? "working" : "idle";
-  }
-  return seen && isSeenDone(pane, seen) ? "idle" : pane.agent_status;
+  return copilotBadge(pane) ?? (seen && isSeenDone(pane, seen) ? "idle" : pane.agent_status);
 }
 
 export function activityOrder<T>(rows: readonly T[], paneOf: (row: T) => Pick<PaneInfo, "pane_id" | "agent_status">, seqs: ReadonlyMap<string, number>): T[] {

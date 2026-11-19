@@ -373,6 +373,12 @@ it.skipIf(process.platform !== "linux")("reads the live API without a report, fo
     expect((await read()).history_id).toBe(initial.history_id);
     expect(await (await fetch(toolUrl(outputRef))).text()).toBe("output ".repeat(900));
     await command(current, pid, ":api-good-activity");
+    // The malformed response retired the activity connection. Reject its next handshake only.
+    await command(current, pid, ":api-reject");
+    expect(await readCopilotForeground(pid, true)).toMatchObject({ state: "unavailable", diagnostic: "rpc_rejected" });
+    await command(current, pid, ":api-allow");
+    expect(await readCopilotForeground(pid, true)).toMatchObject({ state: "selected", sessionId: first, processing: true });
+    expect((await read()).history_id).toBe(initial.history_id);
     await herdrRpc("pane.report_agent_session", { pane_id: current, agent: "copilot", source: "herdr:copilot",
       seq: Date.now() * 1000, agent_session_id: first });
     await command(current, pid, `:api-switch ${second}`);
