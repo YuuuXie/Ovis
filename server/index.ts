@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import type { PendingMessage, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { isLoopbackBind, lanExposed } from "./access.ts";
-import { DeviceStore, mergeAccountTombstones } from "./devices.ts";
+import { DeviceStore, folderTombstones, mergeAccountTombstones, readDeviceRegistry } from "./devices.ts";
 import { PreferenceStore } from "./preferences.ts";
 import { readOmpHeldFilesSetting } from "./omp.ts";
 import { SeenStore } from "./seen.ts";
@@ -53,8 +53,17 @@ import { HerdrUpdater } from "./herdr-update.ts";
 import { PortalService } from "./portal.ts";
 import { RelayService } from "./relay/service.ts";
 import { AccountMailbox, accountServiceUrl, passAccountService } from "./account/mailbox.ts";
+import { accountOpensAll } from "../shared/account-devices-api.ts";
+import { mergeSafetyLogs, SafetyLog } from "./account/safety-log.ts";
+import { PcAccountState } from "./account/pc-binding.ts";
+import { savedServerId } from "./relay/identity.ts";
+import { RemovalEvidence } from "./account/removal-evidence.ts";
+import { DeviceJournal } from "./account/device-journal.ts";
 import { AccountHolds } from "./account/holds.ts";
 import { AccountIntroductions } from "./account/introductions.ts";
+import { PendingRedemptions, type PendingRedemption } from "./account/pending.ts";
+import { askScreenForKey, KeyProofPairings } from "./account/key-proof.ts";
+import { desktopOwnerChannel, desktopOwnerFdChannel, LOCAL_CONFIRM_FILE, LocalConfirms, openConfirmListener, takeDesktopOwnerFd } from "./account/local-confirm.ts";
 import { Telemetry } from "./telemetry.ts";
 import { UsageService } from "./usage.ts";
 import { createSystemSampler, type SystemSampler } from "./system-stats.ts";
@@ -204,6 +213,12 @@ export function createServer(
     /** accept plain-http loopback push endpoints (server/push.ts); only tests delivering to push.fake.ts set it */
     pushLoopbackHttp?: boolean;
     desktopActivity?: boolean;
+    /** OVIS_ACCOUNT_OPENS_ALL, the Step 2 release flag (off by default): screen proof (server/account/local-confirm.ts) exists only with it */
+    accountOpensAll?: boolean;
+    /** the platform the key confirm is decided by; tests name another than this machine's */
+    platform?: NodeJS.Platform;
+    /** the desktop app's end of the desktop-owner channel (`takeDesktopOwnerFd`); used only with `accountOpensAll` */
+    desktopOwner?: { input: ReadableStream<Uint8Array>; write(line: string): void };
     backgroundWait?: { grace: number; limit: number };
     statusNow?: () => number;
     herdrIdentity?: () => string | null;
@@ -247,16 +262,58 @@ export function createServer(
   const token = options.token ?? process.env["OVIS_TOKEN"] ?? "";
   /** paired devices (server/devices.ts) and the PC's Tailscale login: the two ways in besides the token and this PC itself */
   const ovisRelay = options.relay ?? new RelayService({ stateDir, accountService: passAccountService(options.accountService?.url), ...(options.accountService?.fetch ? { accountFetch: options.accountService.fetch } : {}) });
-  const merge = options.siblingStateDir ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
+  const opensAll = provided.accountOpensAll ?? accountOpensAll();
+  // the order is checked against this folder's own rows before the sibling merge, which may remove some (P21, S29)
+  const checkedOrder = (dir: string) => {
+    const state = PcAccountState.open(dir);
+    const own = readDeviceRegistry(join(dir, "devices.json"));
+    if (own.kind === "ok") state.checkRows(own.devices);
+    return state;
+  };
+  const pcAccount = opensAll ? checkedOrder(stateDir) : null;
+  // a strict start changes nothing on disk, and nothing is merged with a damaged folder either, flag on or off: the
+  // check only reads, and a folder main wrote has no numbered row, so main's merge is unchanged (S29)
+  // one rule, whatever the flag and with or without a sibling: when this folder's or its sibling's order is missing or
+  // behind the rows it numbered, the start is blocked as a merge that could not be made blocks it, and writes nothing
+  // to either folder (no merge, fold, repair or legacy pass) until the damage is repaired (S19, S29)
+  const damage = (dir: string) => checkedOrder(dir).strict;
+  const blocked = pcAccount?.strict ?? damage(stateDir) ?? (options.siblingStateDir ? damage(options.siblingStateDir) : null);
+  if (blocked !== null) console.error(blocked);
+  const untouched = blocked !== null;
+  // a binding is trusted only once the sibling folder's clears are read: a cleared bind_id never stands again (P12, T59)
+  // and only a folder of this PC's own relay identity is its sibling there: another identity is another PC (P12)
+  const sameIdentity = (other: string) => { const [mine, theirs] = [savedServerId(stateDir), savedServerId(other)]; return mine === undefined || theirs === undefined || mine === theirs; };
+  if (pcAccount !== null && options.siblingStateDir && !untouched && sameIdentity(options.siblingStateDir)) pcAccount.takeSibling(options.siblingStateDir);
+  const merge = options.siblingStateDir && !untouched ? mergeSiblingState(stateDir, options.siblingStateDir) : null;
+  // every tombstone of both folders is evidence before the merge below coalesces them one per key (T48, P13)
+  const carried = opensAll && options.siblingStateDir && !untouched ? [...folderTombstones(stateDir), ...folderTombstones(options.siblingStateDir)] : [];
   let accountBlocked: string | null = null;
-  if (options.siblingStateDir) {
-    try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir); }
+  if (options.siblingStateDir && !untouched) {
+    try { accountBlocked = mergeAccountTombstones(stateDir, options.siblingStateDir, opensAll); }
     catch (error) { accountBlocked = `cannot merge the account tombstones of ${options.siblingStateDir}: ${error instanceof Error ? error.message : String(error)}`; }
     if (accountBlocked !== null) console.error(accountBlocked);
   }
-  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? null, accountBlocked);
+  // the account safety log is replayed before any listener: what it holds in force decides who may get in (P24, T41)
+  // a sibling folder's log is merged into both before this one is read: nothing in force is lost, nothing ended comes back (T48)
+  const logMerge = opensAll && options.siblingStateDir && !untouched ? mergeSafetyLogs(stateDir, options.siblingStateDir) : null;
+  const safetyLog = opensAll ? SafetyLog.open(stateDir, logMerge) : null;
+  // what nothing rests on any more is folded once replayed; a fold that cannot be written leaves the log whole
+  if (!untouched) try { safetyLog?.fold(); } catch (error) { console.error(`[account] the safety log could not be folded: ${error instanceof Error ? error.message : String(error)}`); }
+  const removals = opensAll ? RemovalEvidence.open(stateDir, safetyLog) : null;
+  // the journal's first entry makes the safety log too, so a journal never stands without its log (P24)
+  const journal = opensAll ? DeviceJournal.open(stateDir, () => safetyLog?.ensureFile()) : null;
+  const devices = new DeviceStore(stateDir, merge?.devicesBlocked ?? blocked, accountBlocked, {
+    safety: safetyLog, pc: pcAccount, removals, journal, carried, held: (key) => accountMailbox.gates().held(key),
+  });
+  const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
+  const accountMailbox = new AccountMailbox({
+    pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
+    devices, identity: () => ovisRelay.currentIdentity(),
+    service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
+  });
+  for (const strict of [safetyLog?.strict, pcAccount?.strict, removals?.strict, journal?.strict]) if (strict) console.error(strict);
   // the machine profile has no open install: from its first answer only the caller on its owner's socket and a device through the relay with its proof get in
-  if (options.profile === "machine" && !devices.gated) devices.closeGate();
+  if (options.profile === "machine") devices.closeGate();
   const preferences = new PreferenceStore(stateDir);
   readOmpHeldFilesSetting(() => preferences.get().settings.ompHeldFiles === true);
   // on herdr-core an agent pinned here is pinned in the Herdr app and its other clients too
@@ -444,12 +501,31 @@ export function createServer(
   }
 
   const requestLog = new RequestLog(stateDir);
-  const accountHolds = new AccountHolds({ enrollingPath: join(stateDir, "account-enrolling.json"), heldPath: join(stateDir, "account-held.json") });
-  const accountMailbox = new AccountMailbox({
-    pendingPath: join(stateDir, "account-pending.json"), holds: accountHolds,
-    devices, identity: () => ovisRelay.currentIdentity(),
-    service: (() => { try { return accountServiceUrl(options.accountService?.url); } catch (error) { return error instanceof Error ? error : new Error(String(error)); } })(), ...(options.accountService?.fetch ? { fetch: options.accountService.fetch } : {}),
-  });
+  // a port file an earlier run left names a port anyone may have taken since
+  try { rmSync(join(stateDir, LOCAL_CONFIRM_FILE), { force: true }); }
+  catch (error) { console.error(`${LOCAL_CONFIRM_FILE} could not be removed: ${error instanceof Error ? error.message : String(error)}`); }
+  const localConfirms = (options.accountOpensAll ?? accountOpensAll()) ? new LocalConfirms() : undefined;
+  // a page that cannot open leaves acts waiting for the desktop app's channel; it never fails the start
+  const confirmListener = (() => {
+    if (!localConfirms) return null;
+    try { return openConfirmListener(localConfirms, { stateDir }); }
+    catch (error) { console.error(`The local confirm page did not open: ${error instanceof Error ? error.message : String(error)}`); return null; }
+  })();
+  const desktopOwner = localConfirms && options.desktopOwner ? desktopOwnerChannel(localConfirms, options.desktopOwner) : null;
+  // devices that redeemed a code and proved their key, waiting for this PC's screen (server/account/pending.ts)
+  const pendingRedemptions = localConfirms ? new PendingRedemptions({
+    serverId: () => ovisRelay.currentIdentity()?.server_id ?? null,
+    // every drop is journalled (P24), with the key and the name it gave, so the device history names it
+    journalDrop: (entry) => { journal?.append({ kind: "drop", how: entry.reason, key: entry.key, no: null, row: null, label: entry.label, by: "pc", account: null }); },
+    release: (codeId, key) => devices.releaseRedemption(codeId, key),
+  }) : undefined;
+  // a code that ends takes what waits on it, however it ends
+  if (pendingRedemptions) devices.onPairingEnded((codeId) => pendingRedemptions.dropCode(codeId));
+  // a key confirm needs a screen this PC can prove: Linux in this release; elsewhere pairing is as before
+  const keyProofPairings = localConfirms && pendingRedemptions && (options.platform ?? process.platform) === "linux"
+    ? new KeyProofPairings({ pending: pendingRedemptions, seams: devices }) : undefined;
+  devices.onKeyRemoved((key, cause) => pendingRedemptions?.dropKey(key, cause));
+  const askScreen = localConfirms && keyProofPairings ? (entry: PendingRedemption) => askScreenForKey(localConfirms, keyProofPairings, entry) : undefined;
   const services: RequestServices = {
     runtimeMove: options.runtimeService ? moveService({
       stateDir, port: server.port ?? DEFAULT_PORT, serving: runtime, facts: () => options.runtimeService?.facts(),
@@ -464,7 +540,7 @@ export function createServer(
       switchRuntime: () => { const answer = options.runtimeService!.request("herdr-core"); return answer.ok ? null : answer.message; },
       ...(options.herdrCoreInstaller ? { installer: options.herdrCoreInstaller } : {}),
     }) : null,
-    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup,
+    options, relay: ovisRelay, relayReceiptIds: new RelayReceiptIds(), hostname, token, bridgeToken, bootId, devices, accountMailbox, accountIntroductions: new AccountIntroductions(Date.now, join(stateDir, "account-introductions.json")), accountHolds, safetyLog, preferences, herdrSidebar, identityOf, serveOnly, portalGuards, shellAgents, agentDetector, agentOffered, agentInstaller, openCodeState, cliProxyRoutes, usageLogin, usage, usageAccounts, systemSampler, fontsDir: join(stateDir, "fonts"), voice, browserSnapshot, core, seen, piReader, orderSequence, clientConnectionLog, requestLog, portalStartup, localConfirms, pendingRedemptions, keyProofPairings, askScreenForKey: askScreen,
     get portalStartupResult() { return portalStartupResult; },
   };
   ovisRelay.resume(services, server.port ?? DEFAULT_PORT);
@@ -556,12 +632,15 @@ export function createServer(
       });
       piReader.close();
       stopPinBridge?.stop();
+      safetyLog?.close();
       void usageLogin.stopAll();
       void shellAgents.stop();
       agentDetector.close();
       server.stop(true);
       ipv6?.stop(true);
       ownerListener?.stop(true);
+      confirmListener?.stop();
+      desktopOwner?.stop();
       for (const listener of lanListeners) listener.stop(true);
       releaseFilePool();
       releaseCommandHistory();
@@ -571,6 +650,8 @@ export function createServer(
 }
 
 export async function serve(): Promise<void> {
+  // before anything is spawned, so no child holds the desktop app's channel
+  const desktopOwnerFd = takeDesktopOwnerFd(process.argv);
   const profile = process.env["OVIS_PROFILE"] === "machine";
   if (profile && !fleetPreview()) {
     console.error("The machine profile is a preview and was not started; set OVIS_PREVIEW=fleet beside OVIS_PROFILE=machine to start it.");
@@ -670,6 +751,7 @@ export async function serve(): Promise<void> {
       runtimeService: runtimeService({ stateDir, port: Number(startEnv["PORT"] || DEFAULT_PORT), serving: choice.runtime, source: choice.source, ...(fallback ? { fallback } : {}), env: startEnv, core: herdrCoreFacts, accepted: () => launchAccepted, restart: (id) => process.send?.({ type: "runtime-restart", id }) }) }),
       portal, relay, tailnet, telemetry, registerBridge: true, herdrProfiles: readHerdrProfiles, shellAgents: new ShellAgentLocator(), agentDetector: new AgentDetector({ locate: catalogLocator({ probe: defaultLoginProbe() }) }), stateDir, siblingStateDir: siblingStateDir(stateDir),
       desktopActivity: process.env["OVIS_DESKTOP_APP"] === "1",
+      ...(desktopOwnerFd !== null ? { desktopOwner: desktopOwnerFdChannel(desktopOwnerFd) } : {}),
       ...(lanConfig !== null && !("error" in lanConfig) ? { lanHttps: lanConfig } : {}) });
     ownership?.listening(instance.port, instance.hostname);
     if (profile) {

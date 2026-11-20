@@ -4,7 +4,7 @@
  * a drive member of this PC's account, and never lets a removed key back in.
  */
 import { accountDeviceId, AccountRecordError, ACCOUNT_RECORDS_MAX, parseAccountRecord, verifyAccountRecord, type AccountRecord, type LinkRecord } from "../../shared/account-records.ts";
-import type { DeviceStore, LinkArrival } from "../devices.ts";
+import { AdmissionRefusedError, type DeviceStore, type LinkArrival } from "../devices.ts";
 import type { PairedDevice } from "../../shared/protocol.ts";
 import type { Vouch } from "./mailbox.ts";
 
@@ -53,10 +53,16 @@ function apply(store: DeviceStore, record: AccountRecord, serverId: string | nul
   if (gates?.enrolling()) return refused("enrolling");
   // a key this PC holds back, or a signer it holds back (a remove for it waits here): the add waits for that to settle
   if (gates?.held(record.key) || gates?.removing?.(record.signer)) return refused("removal_pending");
+  // the final guard (G3): a lock, or a block or freeze this key is newer than, holds the add back, and it is not kept
+  if (!store.admits(record.key)) return refused("removal_pending");
   if (serverId === null) return refused("account_unavailable");
   const id = accountDeviceId(serverId, record.key);
   if (store.has(id)) return refused("record_invalid");
-  store.addAccountDevice({ id, key: record.key, label: record.label, role: record.role, account: record.account, addedBy: signer.id, record }, now);
+  try { store.addAccountDevice({ id, key: record.key, label: record.label, role: record.role, account: record.account, addedBy: signer.id, record }, now); }
+  catch (error) {
+    if (error instanceof AdmissionRefusedError) return refused("removal_pending");
+    throw error;
+  }
   return { id: record.id, outcome: "applied" };
 }
 
@@ -84,7 +90,10 @@ export async function applyAccountRecords(store: DeviceStore, values: readonly u
   const undecided = new Set<string>();
   const batchGates = withUndecided(gates, undecided);
   for (const value of values) {
+    // a denial while this record is verified means its add no longer stands on what was checked (P14)
+    const noted = store.gen();
     const record = await read(value);
+    if (!("refused" in record) && record.kind === "add" && store.gen() !== noted) { outcomes.push({ id: record.id, outcome: "refused", code: "removal_pending" }); continue; }
     outcomes.push("refused" in record ? { id: record.id, outcome: "refused", code: record.refused } : waited(apply(store, record, serverId, now, batchGates), record, value, wait, undecided));
   }
   return outcomes;
@@ -104,7 +113,10 @@ export async function applyEnrollment(store: DeviceStore, values: readonly unkno
   const undecided = new Set<string>();
   const gates = withUndecided(options.gates, undecided);
   const outcomes: (RecordOutcome | undefined)[] = values.map(() => undefined);
+  const noted = store.gen();
   const records = await Promise.all(values.map(read));
+  // a denial while the batch was verified: its removes still apply, and none of its adds (P14)
+  const moved = store.gen() !== noted;
   const removes: number[] = [];
   let adds: number[] = [];
   records.forEach((record, index) => {
@@ -118,6 +130,7 @@ export async function applyEnrollment(store: DeviceStore, values: readonly unkno
     return value;
   };
   const signed = (index: number) => record(index).issued_at;
+  // issued_at met ISO_MS at parse: a four-digit year, so string order is time order
   for (const index of removes.sort((a, b) => signed(a) < signed(b) ? -1 : signed(a) > signed(b) ? 1 : 0)) {
     outcomes[index] = waited(apply(store, record(index), serverId, now, gates), record(index), values[index], options.wait, undecided);
   }
@@ -125,7 +138,7 @@ export async function applyEnrollment(store: DeviceStore, values: readonly unkno
     progress = false;
     const next: number[] = [];
     for (const index of adds) {
-      const outcome = apply(store, record(index), serverId, now, gates);
+      const outcome: RecordOutcome = moved ? { id: record(index).id, outcome: "refused", code: "removal_pending" } : apply(store, record(index), serverId, now, gates);
       outcomes[index] = outcome;
       if (outcome.outcome === "refused" && outcome.code === "signer_not_member") next.push(index);
       else if (outcome.outcome === "applied") progress = true;

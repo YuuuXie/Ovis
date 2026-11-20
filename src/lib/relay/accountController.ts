@@ -3,16 +3,16 @@ import { importPublicKey } from "../../../shared/relay-e2ee.ts";
 import { newRecordId } from "../../../shared/account-records.ts";
 import type { RelayOffer } from "../../../shared/relay-offer.ts";
 import { myPcs } from "../account/myPcs.ts";
-import { AccountService, AccountServiceError, AccountServiceUnreachableError, accountProvidersOf, sameSignIn, shellAccountServiceOf, SignedOutError } from "../account/service.ts";
+import { AccountService, AccountServiceError, AccountServiceUnreachableError, accountProvidersOf, offeredProviders, sameSignIn, shellAccountServiceOf, SignedOutError } from "../account/service.ts";
 import type { DirectoryPc } from "../account/service.ts";
 import { indexedAccountStore } from "../account/store.ts";
-import { beginSignIn, finishSignIn, SignInError } from "../account/signin.ts";
+import { beginSignIn, redeemSignIn, SignInError, takePendingSignIn } from "../account/signin.ts";
 import type { SignInReturn } from "../account/signin.ts";
-import type { AccountProvider, AccountSession } from "../account/store.ts";
+import type { AccountProvider, AccountSession, PendingPairing } from "../account/store.ts";
 import { AccountPcError, enrollOnPc, keepRemovals, PEER_STATUS_MS, linkThisDevice, needsLink, pcAccountStatus, planEnroll, sendQueuedAdds, takeIntroduction } from "../account/join.ts";
 import { deleteAccount as deleteAccountOf, holdingSessionStore, installSignInAgain } from "../account/deleteAccount.ts";
 import { leaveAccount } from "../account/leave.ts";
-import { nativeSignIn, nativeSignInAvailable } from "../account/native.ts";
+import { nativeSignIn, nativeSignInAvailable, SignInNotWanted } from "../account/native.ts";
 import { deviceLabel, deviceOs } from "../phone.ts";
 import { t } from "../i18n.ts";
 import { DEVICES_CHANGED_EVENT } from "../useRelay.ts";
@@ -315,7 +315,9 @@ export function createAccountController(mount: RelayShellMount, view: { readonly
   };
 
 
-  const signIn = (provider: AccountProvider): void => {
+  /** `pairing`: a web sign-in leaves the page, so the pairing it is for waits in its pending record (load hands it back) */
+  /** `wanted`: asked again right before the page leaves for the provider (after its pending record is written); false leaves the sign-in unstarted */
+  const signIn = (provider: AccountProvider, pairing?: PendingPairing, wanted?: () => boolean | Promise<boolean>): void => {
     if (accountService === null) return;
     if (accountView?.kind === "signing-in") return;
     deletion = undefined;
@@ -323,22 +325,44 @@ export function createAccountController(mount: RelayShellMount, view: { readonly
     accountView = { kind: "signing-in", provider };
     void changed();
     // in the phone app the system's sign-in sheet brings the return back to the page; elsewhere the page goes to the provider
+    const leave = mount.openSignIn ?? ((url: string) => window.location.assign(url));
+    const unwanted = async (): Promise<void> => { accountView = { kind: "signed-out", error: null }; await changed(); };
+    const native = (): Promise<void> => nativeSignIn(provider, { store: accountStore, service: accountService, ...(wanted ? { wanted } : {}) })
+      .then(() => refresh(true), (error: unknown) => error instanceof SignInNotWanted ? unwanted() : Promise.reject(error));
+    // a press starts as before; a start that asks `wanted` waits on it before it starts, and again before the page (or
+    // the app's sheet) leaves for the provider (the link entry, shell.tsx)
     const started = nativeSignInAvailable()
-      ? nativeSignIn(provider, { store: accountStore, service: accountService }).then(() => refresh(true))
-      : beginSignIn(provider, { store: accountStore, service: accountService, redirectUri: `${window.location.origin}/` }).then(mount.openSignIn ?? ((url) => window.location.assign(url)));
+      ? (wanted === undefined ? native() : Promise.resolve(wanted()).then((go) => go ? native() : unwanted()))
+      : beginSignIn(provider, { store: accountStore, service: accountService, redirectUri: `${window.location.origin}/`, ...(pairing ? { pairing } : {}) })
+        .then(async (url) => wanted === undefined || await wanted() ? leave(url) : unwanted());
     started.catch(async (error: unknown) => {
       console.warn("Ovis: the sign-in did not start", error);
       accountView = { kind: "signed-out", error: signInFailure(error), provider };
       await changed();
     });
   };
-  const load = async (returned: SignInReturn | null): Promise<void> => {
+  /**
+   * `carried`: told of the pairing the returned sign-in was started for, once it is taken, before the code is traded.
+   * `ended`: told how that sign-in itself ended (`refused`: the reason shown; null once its code was traded), whatever
+   * session another tab may have stored meanwhile, as soon as the code is traded and before the directory is read;
+   * undefined when the return carried no pairing.
+   */
+  const load = async (returned: SignInReturn | null, carried?: (pairing: PendingPairing) => void, ended?: (outcome: { readonly refused: string | null; readonly provider: AccountProvider } | undefined) => void): Promise<void> => {
+    let outcome: { readonly refused: string | null; readonly provider: AccountProvider } | undefined;
     if (returned !== null && accountService !== null) {
-      const pending = (await accountStore.get("pending"))?.[returned.state];
+      const pending = await takePendingSignIn(accountStore, returned.state);
       accountView = { kind: "signing-in", ...(pending ? { provider: pending.provider } : {}) };
+      if (pending?.pairing) carried?.(pending.pairing);
       await changed();
-      try { await finishSignIn(returned, { store: accountStore, ...(mount.accountFetch ? { fetch: mount.accountFetch } : {}) }); }
-      catch (error) { accountView = { kind: "signed-out", error: signInFailure(error), ...(pending ? { provider: pending.provider } : {}) }; await changed(); }
+      try {
+        await redeemSignIn(pending, returned, { store: accountStore, ...(mount.accountFetch ? { fetch: mount.accountFetch } : {}) });
+        if (pending?.pairing) outcome = { refused: null, provider: pending.provider };
+      } catch (error) {
+        accountView = { kind: "signed-out", error: signInFailure(error), ...(pending ? { provider: pending.provider } : {}) };
+        if (pending?.pairing) outcome = { refused: signInFailure(error), provider: pending.provider };
+        await changed();
+      }
+      ended?.(outcome);
     }
     await refresh(true);
   };
@@ -646,6 +670,13 @@ export function createAccountController(mount: RelayShellMount, view: { readonly
    * (shell.tsx): none without an account service, or when the store cannot be read.
    */
   const stored = async (): Promise<AccountSession | undefined> => accountService === null ? undefined : await account.session().catch(() => undefined);
+  /** The providers the account service offers now (`GET /v1/providers`), read once; the build's list when it does not answer. */
+  let answer: Promise<{ readonly providers: readonly AccountProvider[]; readonly listed: readonly AccountProvider[] }> | undefined;
+  const answered = () => answer ??= accountService === null ? Promise.resolve({ providers, listed: providers })
+    : offeredProviders(accountService, providers, mount.accountFetch ? { fetch: mount.accountFetch } : {}).then((said) => ({ providers: said.providers, listed: said.listed ?? providers }), () => ({ providers, listed: providers }));
+  const offeredNow = (): Promise<readonly AccountProvider[]> => answered().then((said) => said.providers);
+  /** The providers the service named, an empty list included; the build's only when it gave no answer to read. */
+  const listedNow = (): Promise<readonly AccountProvider[]> => answered().then((said) => said.listed);
   return { get state() { return accountView; }, get directory() { return directory; },
-    get signedInAs() { return accountView?.kind === "signed-in" ? shownFor : undefined; }, enabled: accountService !== null, providers, load, refresh, refreshNow, reread, stored, signIn, signOut, leave, deleteAccount, prepare, enroll, cancelEnrollment, armRefresh };
+    get signedInAs() { return accountView?.kind === "signed-in" ? shownFor : undefined; }, enabled: accountService !== null, providers, offered: offeredNow, listed: listedNow, load, refresh, refreshNow, reread, stored, signIn, signOut, leave, deleteAccount, prepare, enroll, cancelEnrollment, armRefresh };
 }

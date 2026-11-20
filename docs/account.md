@@ -8,6 +8,18 @@ into a PC is still decided by that PC's own device list (`devices.json`), as wit
 [`shared/account-records.ts`](../shared/account-records.ts); tests use the in-memory service in
 [`shared/account-service-fake.ts`](../shared/account-service-fake.ts).
 
+In the apps: the iPhone and Android apps open on the account's sign-in, and a first sign-in makes the
+account ([Sign-in methods](#sign-in-methods)). A new device then joins the account's PCs with one
+approval on a device already in it that drives the PC asked: the new device leads with **Get approved
+on a device you already use**, the device in use asks **Add a new device?** and has its person pick the
+number the new device shows, and the new device confirms **The numbers match**
+([Who may admit a device](#who-may-admit-a-device)). The approver's signed `add` then reaches each PC
+where it is a drive member ([rule 4](#rules)). The account's first device on a PC is approved on the PC
+itself, or, on a PC in no account yet, scans the QR code it shows for the account and confirms
+**Pair**, with nothing approved on the PC ([By QR code](#adding-a-pc)). A PC added over Tailscale or
+SSH (Add a connection → Tailscale or Direct) is no account member ([rule 8](#rules)). The steps are
+in [the guide](guide.md#through-an-account).
+
 Nothing here changes how a device signs in: `AUTH` (`device-key`) and the mux frames stay as they
 are ([Ovis Mux v1](relay.md#ovis-mux-v1)).
 
@@ -38,7 +50,7 @@ are ([Ovis Mux v1](relay.md#ovis-mux-v1)).
    admission trusts it: while a code made to put a PC in an account lives, its word on a device's
    key lets that device in ([The account's word](#the-accounts-word)).
 8. **Tailscale is not membership.** A PC found on your Tailscale is added over SSH (Add a connection →
-   SSH, [remote-pcs.md](remote-pcs.md)), and one an older Ovis added through the relay with a code that
+   Tailscale, [remote-pcs.md](remote-pcs.md)), and one an older Ovis added through the relay with a code that
    PC handed over to your own Tailscale login is a paired device of that PC. Neither is an account member by itself: membership comes only from the
    rules here (a device linking its own pairing, or an approval by a member).
 
@@ -447,7 +459,8 @@ A client offering `pair-sas` offers at most one intent; a PC selects an intent o
 comparison without a selected intent is `pair-intent-pc`.
 
 The approval prompt says what is being approved: **pair this PC**, or **add to the account**; a
-remote approver's app adds how many PCs that means from its own list of the account's PCs. The
+remote approver's card (**Add a new device?**, **Check the number, then approve**) adds how many PCs
+that means from its own list of the account's PCs. The
 intent travels inside the encrypted channel that the digits authenticate: a relay that changes it
 must sit in the middle, and then the digits differ.
 
@@ -531,7 +544,8 @@ answers every outcome, never failing the whole batch for one record:
 ```
 
 Outcomes: `applied`, `unchanged` (an `add` for a key already present; a `remove` for a key already
-removed and absent, or signed before this PC paired the key again) and `refused` with a code. A
+removed and absent, or signed before this PC paired the key again when no other row holds the key)
+and `refused` with a code. A
 `remove` for a key this PC never had still leaves its tombstone, so the key cannot be added later.
 A `remove` refused `signer_not_member` waits on the PC with the mailbox's own such records
 (`account-pending.json`) and applies once its signer becomes a member there; when that queue cannot
@@ -790,12 +804,13 @@ until someone signs in on it; the steps below are then the way.
    ([Enrolling a PC](#enrolling-a-pc)), so the account's other devices are let in and introduced.
 
 A wrong number ends that comparison; the person starts again from **Add** on the dashboard. A device without an account
-pairs with a QR code or pairing code behind **Pair with a QR or code** on the sign-in screen.
+pairs with a QR code or pairing code behind **Start without signing in** on the sign-in screen, which
+leads to **Add a PC**.
 
 ### Adding a PC of your account
 
 **Add a connection → Ovis relay** on a PC (A) whose page is signed in, with A in that account, lists
-the account's other PCs as the SSH tab lists its PCs: **Connect** for one already in A's machine list,
+the account's other PCs: **Connect** for one already in A's machine list,
 **Add** for one that would pair, and "Update Ovis on that PC" or "Offline" with no button. **Add**
 makes A's server a paired device of that PC (B), as **Add a PC through the relay** with a link does,
 and A then lists B like any SSH PC, after a restart too. B's row is a plain drive row: A is never an
@@ -893,7 +908,10 @@ is what authenticates the PC.
   and lets nobody in once the member is revoked or demoted.
 - A `remove` writes its tombstone before it revokes the device; the device's relay connections
   close at once (`auth_revoked`). A `remove` signed before this PC itself paired the key again leaves
-  that pairing be (`unchanged`), so a late or replayed one cannot undo it. A row an `add` or a remote
+  that pairing be, so a late or replayed one cannot undo it; it still takes the key's other rows, such
+  as a member row an `add` made (`applied`), and is `unchanged` when there are none. That `remove`
+  writes no tombstone, as the key stays this PC's pairing: the rows it takes leave `devices.json`
+  only. A row an `add` or a remote
   approval made goes, however late the `remove` arrives, and so does a row a `link` moved onto the
   key from another one (`link_moved_key`): this PC paired its former key, never this one. A `link`
   whose `old_key` is its `key` leaves the row a pairing of that key.
@@ -950,6 +968,32 @@ is what authenticates the PC.
   that linked itself to the account that signed in since the list was read stays. Membership is
   what the row says, which for an account's first member on a PC is that device's own claim
   ([What this does not protect against](#what-this-does-not-protect-against)).
+
+### Confirmed on this PC
+
+Off unless `OVIS_ACCOUNT_OPENS_ALL=1`; nothing below exists without it. Some acts are taken only
+when they are confirmed on this PC's own screen (`server/account/local-confirm.ts`). The server
+puts the act on the screen; it is answered there, once, within 2 minutes, and the approval is
+used up by that one act and no other (an approval of one key approves no other key). Nothing
+answers one but these two:
+
+- The desktop app that started the server, over a socket it passes as `--desktop-owner-fd <n>`
+  to a directly started `serve`: the server reads one JSON line per answer (`{"approve":"<id>"}`
+  or `{"decline":"<id>"}`) and writes the open acts after every change. The argument is removed
+  and the descriptor made close-on-exec before anything is spawned, so no child holds it. Linux
+  only for now; elsewhere the descriptor gives no channel. The supervisor removes the argument
+  and closes the descriptor without passing it on.
+- The local confirm page, on a listener of its own on `127.0.0.1` whose port is only in
+  `local-confirm.json` in the state folder (readable by your user only). It is opened only on
+  Linux, where the kernel names the user behind a connection, and answers only that user, with no
+  proxy header, a Host of exactly its address and, for an answer, its own Origin and the one-time
+  value its page was given. On Windows neither path exists yet.
+
+Every route of the server refuses these answers (`local_required`), through the relay, the access
+token, a paired device, a loopback window or the bridge credential alike. A restart ends every
+open confirm. What this does not prove: that a person sat there. A program that runs as your user
+on this PC, a terminal that a driving device opened included, or anyone who logs in to this PC,
+reaches the same screen as you do.
 
 ## Account service API
 

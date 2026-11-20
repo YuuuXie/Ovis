@@ -1,5 +1,4 @@
 export const DASHBOARD_ZH: Record<string, string> = {
-  "Add a PC": "添加电脑",
   "A PC joins through your account, or pairs with this device alone.": "电脑可以通过你的账户加入，或只与此设备配对。",
   "Add {name} to your account": "将 {name} 添加到你的账户",
   "Add this device to {name}": "将此设备添加到 {name}",
@@ -9,8 +8,8 @@ export const DASHBOARD_ZH: Record<string, string> = {
   "On the PC, open Settings → Devices and PCs → Account, sign in, then choose Add this PC to my account. It then shows here.": "在电脑上打开“设置 → 设备和电脑 → 账户”并登录，然后选择“将此电脑添加到我的账号”。之后它会显示在这里。",
   "Join · approve on a connected device of your account, or type the number the PC shows": "加入 · 在已连接的账户设备上批准，或输入电脑显示的数字",
   "Approve this device on a device of your account connected to {name}, or on {name} if it shows this request.": "请在你账户中已连接到 {name} 的设备上批准此设备；如果 {name} 显示了此请求，也可以在那里批准。",
-  "First open {name} in Ovis on a device that already uses it (your phone, for example) and keep it open. Then choose Ask to join.": "请先在已经使用这台电脑的设备（例如手机）上用 Ovis 打开 {name} 并保持打开，然后选择“请求加入”。",
-  "If {name} is waiting on its own screen to be added, type its number here instead.": "如果 {name} 正在自己屏幕上等待添加，请改为在这里输入它的数字。",
+  "Get approved on a device you already use": "在已在使用的设备上获得批准",
+  "Open {name} in Ovis on a device you already use. When the notice shows there, check the number and approve.": "请在你正在使用的设备上用 Ovis 打开 {name} 并保持打开。那里出现通知后，核对数字并批准。",
   "Type the number": "输入数字",
   "{name} shows no number? Ask to join instead.": "{name} 没有显示数字？请改为请求加入。",
   "A new number is shown on {name} because the previous number changed.": "之前的数字已更改，{name} 上显示了新数字。",
@@ -101,4 +100,5 @@ export const DASHBOARD_ZH: Record<string, string> = {
   "Compact makes text one step smaller and rows shorter, so more fits on the screen.": "“紧凑”会把文字缩小一级、行高调低，让一屏显示更多内容。",
   "The text size of this app's menus, lists and dialogs.": "本应用的菜单、列表和对话框的字号。",
   "The language of this app. System follows the browser's language.": "本应用的显示语言。“跟随系统”则跟随浏览器的语言。",
+  "Pair with a QR or code": "使用二维码或配对码配对",
 };

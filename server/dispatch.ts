@@ -7,11 +7,11 @@ import type { RequestLog } from "./request-log.ts";
 import { handlePaneRequest } from "./pane-routes.ts";
 import { handleIntegrationsRequest } from "./integrations-routes.ts";
 import type { OrderSequence } from "./order-sequence.ts";
-import type { DevicePairedEvent, DeviceRemovedEvent, HealthAuth, RelayPairingsEvent, RemotePairingsEvent, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
+import type { HealthAuth, ObservedIngress, SecuritySummary, SessionSnapshot } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { authClient, deviceAuthorizationValue, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { bindScope, cameThroughProxy, decideAccess, decideMachineAccess, forwardingHeaders, inTailnet, isLoopbackAddress, isServeOwnerRequest, lanExposed, machineForwardingHeaders, observedIngress, ownerAccess } from "./access.ts";
-import { type DeviceStore, handleDeviceRequest, newStreamKey, sameBrowser, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
+import { type DeviceStore, handleDeviceRequest, newStreamKey, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
 import { handlePreferencesRequest, type PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, type SeenStore } from "./seen.ts";
 import { remoteAccess } from "./tailscale.ts";
@@ -46,9 +46,14 @@ import { handleUpdateRequest, updateRequestAllowed } from "./update-api.ts";
 import { handleHerdrUpdateRequest } from "./herdr-update.ts";
 import { handlePortalRequest } from "./portal.ts";
 import { handleRelayRequest } from "./relay/routes.ts";
+import type { LocalConfirms } from "./account/local-confirm.ts";
+import type { PendingRedemption, PendingRedemptions } from "./account/pending.ts";
+import type { KeyProofPairings } from "./account/key-proof.ts";
+import { handlePendingRequest } from "./account/pending-routes.ts";
 import { handleAccountRequest } from "./account/routes.ts";
 import type { AccountMailbox } from "./account/mailbox.ts";
 import type { AccountHolds } from "./account/holds.ts";
+import type { SafetyLog } from "./account/safety-log.ts";
 import type { AccountIntroductions } from "./account/introductions.ts";
 import type { RelayService } from "./relay/service.ts";
 import { handleTelemetryRequest, visitSurface } from "./telemetry.ts";
@@ -63,6 +68,7 @@ import { BRIDGE_PROTOCOL } from "../shared/machines.ts";
 import { bridgeIdentity } from "./bridge.ts";
 import { discoverHerdrSessions } from "./herdr-discovery.ts";
 import { handleMachineRequest, nonCanonicalPath, slowMachinePath, type EventStreamBudget } from "./machine-api.ts";
+import { machinePairingEvents } from "./machine-pairing-events.ts";
 import { handleSessionHistoryRequest, handleSessionResumeRequest, SESSION_HISTORY_PATH, SESSION_RESUME_PATH } from "./session-history-routes.ts";
 import type { PiSessionReader } from "./pi-session-metadata.ts";
 import type { HerdrSidebarConfig } from "./herdr-sidebar.ts";
@@ -92,6 +98,8 @@ export interface RequestServices {
   readonly accountMailbox: AccountMailbox;
   readonly accountIntroductions: AccountIntroductions;
   readonly accountHolds: AccountHolds;
+  /** the account safety log; null while OVIS_ACCOUNT_OPENS_ALL is off */
+  readonly safetyLog: SafetyLog | null;
   readonly preferences: PreferenceStore;
   readonly herdrSidebar: HerdrSidebarConfig;
   /** `loginPath`: the request states a Tailscale login, so the PC's own login must be known, not merely cached as unknown */
@@ -118,6 +126,14 @@ export interface RequestServices {
   readonly orderSequence: OrderSequence;
   readonly clientConnectionLog: ClientConnectionLog;
   readonly requestLog: RequestLog;
+  /** acts waiting for this PC's screen (server/account/local-confirm.ts); only with the Step 2 release flag */
+  readonly localConfirms?: LocalConfirms;
+  /** devices waiting for this PC's screen to approve their key (server/account/pending.ts); only with the release flag */
+  readonly pendingRedemptions?: PendingRedemptions;
+  /** pairings that prove their key and wait for this PC's screen (server/account/key-proof.ts); Linux with the flag only */
+  readonly keyProofPairings?: KeyProofPairings;
+  /** puts a waiting key on this PC's screen */
+  readonly askScreenForKey?: (entry: PendingRedemption) => void;
   readonly portalStartupResult: PortalStartup | undefined;
   readonly portalStartup: Promise<PortalStartup>;
 }
@@ -162,6 +178,12 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   const relayPeer = ctx.peer.kind === "relay" ? ctx.peer.device : undefined;
   // the machine profile on TCP: its liveness for every caller; no credential or header of the request is read
   if (options.profile === "machine" && relayPeer === undefined && ctx.ownerSocket !== true) return machineTcpAnswer(request, pathname);
+  // an act waiting for this PC's screen is answered there alone (server/account/local-confirm.ts): every caller of a
+  // route gets the same refusal, before anything about it is decided
+  if (ctx.services.localConfirms !== undefined && /^\/api\/account\/local-confirm(?:\/|$)/.test(pathname)) {
+    setRequestRoute("/api/account/local-confirm");
+    return jsonResponse({ error: { code: "local_required", message: "Confirm this on this PC's own screen." } }, 403);
+  }
   const bridgeAuthorized = options.profile !== "machine" && relayPeer === undefined && ctx.lanHttps !== true && isAuthenticated(request, bridgeToken);
   // the connection server that reaches this one as its PC reads its update status and asks for the
   // update on offer: an Ovis run on this PC by itself is updated through its own updater, never
@@ -207,6 +229,17 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     : { owner: null, tagged: false, soleLogin: null, dnsName: null, tailnetIp: null };
   // Portal reaches this server over loopback, never the LAN listener: its proof is not a way in there
   const portalProven = relayPeer === undefined && ctx.lanHttps !== true && (options.portal?.vouches(request.headers.get("x-portal-proof") ?? null) ?? false);
+  // How this request came, for /api/health and the daily active message: the relay session it arrived on (any of
+  // its carriers), Portal, else what the request itself proves (observedIngress). Portal's proof says so even when
+  // the token or a paired device signed the request in. A Portal with no sign-in has no proof to send: for
+  // /api/health (`portalShape`) a request from this PC in the shape it forwards (X-Forwarded-Proto https) to an
+  // address it serves is taken as Portal's, since another program here could send the same and would only
+  // mislabel its own answer. That shape is headers, so the counts never take it
+  const requestIngress = (portalShape: boolean): ObservedIngress => {
+    if (relayPeer !== undefined) return "relay";
+    if (portalProven || (portalShape && loopback && request.headers.get("x-forwarded-proto") === "https" && (options.portal?.serves(requestHost) ?? false))) return "portal";
+    return observedIngress({ ...requestShape, ...identity, peerKnown: ip !== null, forwardingHeaders: forwardingHeaders(request.headers) });
+  };
   const access = options.profile === "machine" ? decideMachineAccess({ relayPeer, ownerSocket: ctx.ownerSocket === true, host: requestHost, forwarded: machineForwardingHeaders(request.headers) }) : decideAccess({
     relayPeer,
     ...requestShape,
@@ -346,6 +379,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     setRequestRoute("owner-refusal");
     return jsonResponse({ error: { code: "owner_only", message: "Add PCs of your account on this PC itself, or from a device paired with it directly." } }, 403);
   }
+  // so is another PC's Ovis added by its address: this PC would keep a device token that drives it
+  if (pathname === "/api/machines/address" && access.level === "full" && (access.via === "open" || access.via === "portal" || access.via === "relay")) {
+    setRequestRoute("owner-refusal");
+    return jsonResponse({ error: { code: "owner_only", message: "Add a PC by its address on this PC itself, or from a device paired with it directly." } }, 403);
+  }
   // The SSH tab's list (hosts of this PC's ssh config with their user@hostname, and its Tailscale login's PCs) goes
   // only to clients that may drive this PC with full access: this PC itself, its access token, a device paired with
   // it directly to drive, and another PC on the owner's Tailscale login. Each of those can already open a terminal
@@ -411,33 +449,12 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       const machinePathAsked = pathname.split("/").slice(4).join("/");
       ctx.timeout(request, pathname === "/api/machines/events" ? 0 : machinePathAsked === "runtime/move/install" ? 210 : slowMachinePath(machinePathAsked) || pathname === "/api/machines/relay/account/pair" ? 180 : 80);
       const deviceId = access.level === "full" ? access.device?.id : undefined;
-      // a device's enrollment is news to every stream but the new device's own: one the stream's
-      // device cookie names, or one this browser asked for itself (its stream key, server/devices.ts),
-      // which a stream opened before that device existed cannot know by its cookie. A browser
-      // without a key gets one with this stream; a key is a cookie of its own name, so tabs that
-      // open at once each add theirs and the pairing later carries all of them
+      // Tabs opening at once each get a cookie of their own name; a later pairing carries all of them.
       const presentedKeys = streamKeys(request);
       const issuedKey = presentedKeys.length === 0 && pathname === "/api/machines/events" ? newStreamKey() : null;
       const keys = issuedKey === null ? presentedKeys : [issuedKey];
-      // a stream that came in through the open LAN is told nothing: every enrollment follows the write
-      // that closed the gate, which ends the stream (endWithGate below), so whoever held it has no access left
-      // by the time there is news
       const openAccess = access.level === "full" && access.via === "open";
-      // a relay pairing waiting for approval reaches only a window that may approve it (server/relay/routes.ts):
-      // driving, direct to this PC, and not a Portal visitor
-      const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
-      // and through the relay to a drive account member, with three candidates instead of the digits (docs/account.md)
-      const remoteApprover = ctx.peer.kind === "relay" && devices.isAccountApproverSession(ctx.peer.device.id, ctx.peer.key);
-      const pairings = { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void) => {
-        const stopPaired = devices.onPaired((event, origin) => { if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); });
-        // removals go to streams that may drive, as the client lane's device list needs (docs/account.md)
-        const stopRemoved = !openAccess && access.level === "full" && access.role === "drive" ? devices.onRemoved(listener) : undefined;
-        // a window that may not approve is told the list is empty, so one that lost the right (drive to watch) drops its prompts
-        const stopRelay = approver ? ctx.services.relay.approvals.subscribe((list) => listener({ type: "relay-pairings", pairings: list }))
-          : remoteApprover ? ctx.services.relay.approvals.subscribeRemote((list) => listener({ type: "remote-pairings", pairings: list })) : undefined;
-        if (!approver) listener({ type: "relay-pairings", pairings: [] });
-        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
-      } };
+      const pairings = machinePairingEvents(ctx, access, keys);
       // a stream ends with what let it in: a device's revoke, the gate closing on one the open LAN let in, Portal's recheck
       const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : openAccess ? (close) => devices.endWithGate(close) : portalRecheckMs !== undefined ? (close) => { const timer = setTimeout(close, portalRecheckMs); return () => clearTimeout(timer); } : undefined, preferences, readOnly, herdrSidebar, seen, pairings, ctx.relayBodyBudget, ownerAccess(access));
       response.headers.set("cache-control", "no-store");
@@ -471,9 +488,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     }
     // what the daily active message counts of this visit: the page's kind of screen and the way it came in;
     // nothing for another server's bridge, or for a surface no page names (visitSurface)
-    const observed = observedIngress({ ...requestShape, ...identity, peerKnown: ip !== null, forwardingHeaders: forwardingHeaders(request.headers) });
     const surface = bridgeAuthorized ? false : visitSurface(url.searchParams.get("surface"));
-    const ingress: TelemetryIngress = observed === "direct" ? (loopback ? "local" : "lan") : observed;
+    const observed = surface === false ? undefined : requestIngress(false);
+    const ingress: TelemetryIngress | undefined = observed === "direct" ? (loopback ? "local" : "lan") : observed;
     // Reuse the terminal socket for the same authorized event document as /api/machines/events.
     const useMachineEvents = machines && !bridgeAuthorized && process.env["OVIS_MACHINE_EVENTS_WS"] !== "0";
     const presentedKeys = streamKeys(request);
@@ -481,25 +498,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
     const keys = issuedKey === null ? presentedKeys : [issuedKey];
     if (issuedKey !== null) headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
     const openAccess = access.level === "full" && access.via === "open";
-    // relay pairings waiting for approval reach only a window that may approve one, as on /api/machines/events
-    const approver = access.level === "full" && access.role === "drive" && access.via !== "open" && access.via !== "relay" && access.via !== "portal";
     const machineEvents = useMachineEvents ? {
       manager: machines, preferences, herdrSidebar, seen,
-      pairings: { subscribe: (listener: (event: DevicePairedEvent | DeviceRemovedEvent | RelayPairingsEvent | RemotePairingsEvent) => void) => {
-        const stopPaired = devices.onPaired((event, origin) => {
-          if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event);
-        });
-        const stopRemoved = !openAccess && access.level === "full" && access.role === "drive" ? devices.onRemoved(listener) : undefined;
-        // and through the relay to a drive account member holding its row's current key, as on /api/machines/events
-        const remoteApprover = ctx.peer.kind === "relay" && devices.isAccountApproverSession(ctx.peer.device.id, ctx.peer.key);
-        // a window that may not approve is told the list is empty, so one that lost the right (drive to watch) drops its prompts
-        const stopRelay = approver ? ctx.services.relay.approvals.subscribe((list) => listener({ type: "relay-pairings", pairings: list }))
-          : remoteApprover ? ctx.services.relay.approvals.subscribeRemote((list) => listener({ type: "remote-pairings", pairings: list })) : undefined;
-        if (!approver) listener({ type: "relay-pairings", pairings: [] });
-        return () => { stopPaired(); stopRemoved?.(); stopRelay?.(); };
-      } },
+      pairings: machinePairingEvents(ctx, access, keys),
     } : undefined;
-    const upgraded = ctx.upgrade(request, { headers, data: connectionData({ machineEvents, deviceId, readOnly, ...(openAccess && !bridgeAuthorized ? { open: true } : {}), bridge: bridgeAuthorized, ...(surface ? { surface } : {}), ...(surface === false ? {} : { ingress }), ...recheck }) });
+    const upgraded = ctx.upgrade(request, { headers, data: connectionData({ machineEvents, deviceId, readOnly, ...(openAccess && !bridgeAuthorized ? { open: true } : {}), bridge: bridgeAuthorized, ...(surface ? { surface } : {}), ...(ingress === undefined ? {} : { ingress }), ...recheck }) });
     if (upgraded) return undefined;
     return new Response("websocket upgrade required", { status: 426 });
   }
@@ -515,6 +518,10 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       forgetPageMedia({ client });
     }
     return handleAuthRequest(request, token, client);
+  }
+  const pendingRedemptions = ctx.services.pendingRedemptions;
+  if (pendingRedemptions !== undefined && (pathname === "/api/devices/pending" || pathname.startsWith("/api/devices/pending/"))) {
+    return handlePendingRequest(request, pathname, pendingRedemptions, access);
   }
   if (pathname === "/api/devices" || pathname.startsWith("/api/devices/")) {
     try {
@@ -615,16 +622,11 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
       : { host: new URL(directCarriers[0]!.replace(/^ws:/, "http:")).hostname };
     const exposure = { ...(lan_exposure ? { lan_exposure } : {}), ...(direct_exposure ? { direct_exposure } : {}) };
     // what protects this server, for a client that got in (a watching one too) and nobody else;
-    // per request, so never stored. The ingress is this request's, proven or `unknown`.
-    // Portal's proof says how the request came even when the token or a paired device signed it in.
-    // A Portal with no sign-in has no proof to send: a request from this PC in the shape it forwards
-    // (X-Forwarded-Proto https) to an address it serves is all there is. Another program here could
-    // send the same and would only mislabel its own answer; nothing here lets anyone in
-    const portalForwarded = portalProven || (loopback && request.headers.get("x-forwarded-proto") === "https" && (options.portal?.serves(requestHost) ?? false));
-    const ingress = relayPeer !== undefined ? "relay" : portalForwarded ? "portal" : observedIngress({ ...requestShape, ...identity, peerKnown: ip !== null, forwardingHeaders: forwardingHeaders(request.headers) });
+    // per request, so never stored. The ingress is this request's, proven or `unknown`
+    const ingress = requestIngress(true);
     const security: SecuritySummary | undefined = access.level === "full" ? {
       token_configured: token !== "",
-      pairing_gate: devices.error !== null ? "unavailable" : devices.gated ? "closed" : "open",
+      pairing_gate: devices.error !== null || devices.failsClosed ? "unavailable" : devices.gated ? "closed" : "open",
       bind_scope: bindScope(hostname),
       observed_ingress: ingress,
       public_exposure: ingress === "funnel" ? "observed" : "unknown",

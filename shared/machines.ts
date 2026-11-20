@@ -6,7 +6,7 @@ import type { SeenFinish } from "./seen.ts";
 
 export const LOCAL_MACHINE = "local";
 export const BRIDGE_PROTOCOL = 1;
-export const REMOTE_BUNDLE_VERSION = "49";
+export const REMOTE_BUNDLE_VERSION = "50";
 export interface PaneTarget { machine_id: string; pane_id: string }
 export type MachineState = "connecting" | "connected" | "reconnecting" | "disconnected" | "error";
 export interface SshTarget {
@@ -20,16 +20,24 @@ export interface SshTarget {
   /** Explicitly chosen on this PC; permits starting its configured session when absent. */
   start_new_herdr?: boolean;
 }
+/** Why POST /api/machines/address added no PC, answered as `address_pc_<failure>`: the app words each one. */
+export const ADDRESS_PC_FAILURES = ["address", "target", "code", "wrong_code", "waiting", "unreachable", "not_ovis", "added", "self"] as const;
+export type AddressPcFailure = typeof ADDRESS_PC_FAILURES[number];
+/** A PC this server is paired with as one of its devices (relay, address): it runs its own Ovis, which it is revoked on. */
+export function pairedPc(machine: Pick<Machine, "kind">): boolean { return machine.kind === "relay" || machine.kind === "address"; }
 export interface Machine {
   /** Read-only identity inherited from the local herdr catalog. */
   herdr_profile_id?: string;
   id: string;
   name: string;
   /** hc: another machine of this PC's herdr-core (`hc machine add`), reached through that core */
-  kind: "local" | "ssh" | "relay" | "hc";
+  /** address: another PC's own Ovis added by its https address, paired as a device that drives it */
+  kind: "local" | "ssh" | "relay" | "hc" | "address";
   target?: SshTarget;
   /** a PC added through the Ovis relay (no SSH): its relay ID and the relay it is reached through */
   relay?: { server_id: string; relay: string };
+  /** an address PC's origin, such as https://desk.example.ts.net */
+  address?: string;
   /**
    * How a connected relay PC is reached now: on one of its direct carriers (its own network, or Tailscale), or
    * through the relay. Absent while it is not connected, and for other kinds of PC.
@@ -439,7 +447,22 @@ export type MachineEvent = { type: "machines"; machines: Machine[] } | { type: "
   | DevicePairedEvent
   | DeviceRemovedEvent
   | RelayPairingsEvent
-  | RemotePairingsEvent;
+  | RemotePairingsEvent
+  | PendingRedemptionsEvent;
+/**
+ * A device that redeemed a code and proved its key, waiting for this PC's screen to approve that key (device table S31,
+ * T71). `label` is what the device says about itself; `fingerprint` is what its own screen shows for the same key.
+ */
+export interface PendingKey {
+  id: string;
+  label: string;
+  fingerprint: string;
+  via: "relay" | "address";
+  redeemed_at: string;
+  slots: { used: number; of: number };
+}
+/** every device waiting for this PC's screen, after each change; to streams that may drive (approving stays on the screen) */
+export interface PendingRedemptionsEvent { type: "pending-redemptions"; pending: PendingKey[] }
 /** every relay pairing waiting for approval, after each change; only to the PC's own windows that may approve one */
 export interface RelayPairingsEvent { type: "relay-pairings"; pairings: RelayPairingRequest[] }
 /** every relay pairing waiting for approval, after each change; only to drive account members connected through the relay */
