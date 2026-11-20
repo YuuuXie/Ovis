@@ -17,11 +17,10 @@ const { WindowsControl } = await import("../server/windows-control.ts");
 const identity = await ping();
 const state = join(root, "fit-qa");
 mkdirSync(state, { recursive: false });
-const created = await workspaceCreate({ cwd: state, label: "ovis-fit-disposable" });
-const pane = created.root_pane.pane_id;
 const evidence = process.env["UI_EVIDENCE_DIR"];
 if (evidence) mkdirSync(evidence, { recursive: true });
-const server = createServer({ hostname: "127.0.0.1", port: 0, token: "", stateDir: state });
+let pane: string;
+let server: ReturnType<typeof createServer> | undefined;
 const sockets: WebSocket[] = [];
 let external: InstanceType<typeof WindowsControl> | undefined;
 async function until<T>(read: () => T | undefined, what: string): Promise<T> {
@@ -106,6 +105,7 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
   } finally { await browser.close(); }
 }
 async function connect(mode: "observe" | "interact") {
+  assert(server);
   const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`);
   sockets.push(ws);
   const frames: ServerMessage[] = [];
@@ -121,7 +121,10 @@ async function connect(mode: "observe" | "interact") {
   return { send, wait, close: () => ws.close(), attach: (cols: number, rows: number, keep_size = false) => send({ type: "attach", pane_id: pane, cols, rows, keep_size, windows_fit: true }),
     grid: (cols: number, rows: number) => wait(f => f.type === "pane-geometry" && f.fixed === false && f.windows_fit === true && f.cols === cols && f.rows === rows, "confirmed owner geometry") };
 }
+const created = await workspaceCreate({ cwd: state, label: "ovis-fit-disposable" });
 try {
+  pane = created.root_pane.pane_id;
+  server = createServer({ hostname: "127.0.0.1", port: 0, token: "", stateDir: state });
   console.log(`Native herdr ${identity.version}, protocol ${identity.protocol}`);
   const original = await consoleSize();
   const observer = await connect("observe");
@@ -156,6 +159,9 @@ try {
   other.send({ type: "take-over", pane_id: pane }); await other.grid(67, 24);
   assert.equal(await consoleSize(), "67x24");
   owner.send({ type: "resize", pane_id: pane, cols: 39, rows: 14 });
+  owner.send({ type: "ping", id: 2 });
+  await owner.wait(f => f.type === "pong" && f.id === 2, "fence retired owner's resize");
+  assert.equal(await consoleSize(), "67x24");
   other.send({ type: "resize", pane_id: pane, cols: 120, rows: 40 }); await other.grid(120, 40);
   assert.equal(await consoleSize(), "120x40");
   console.log(`PASS observer, keep-size, exclusive claim, explicit takeover, retired owner and real console 120x40 -> 40x15 -> 67x24 -> 120x40 (unattached: ${original})`);
@@ -195,8 +201,9 @@ try {
     await browserTakeover(page.url(), grants.at(-1)!);
   } finally { await browser.close(); }
 } finally {
-  external?.kill();
-  for (const ws of sockets) ws.close();
-  server.stop();
-  await workspaceClose(created.workspace.workspace_id);
+  try {
+    external?.kill();
+    for (const ws of sockets) ws.close();
+    server?.stop();
+  } finally { await workspaceClose(created.workspace.workspace_id); }
 }

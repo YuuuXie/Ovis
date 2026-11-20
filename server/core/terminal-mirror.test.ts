@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mirrorFrame } from "../mirror.ts";
@@ -59,7 +59,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function recorder() {
+function recorder(onMessage?: (frame: Frame) => void) {
   const frames: Frame[] = [];
   const grids: Frame[] = [];
   const waiters: { count: number; done: () => void }[] = [];
@@ -69,6 +69,7 @@ function recorder() {
     getBufferedAmount: () => 0,
     send(raw: string) {
       const frame = JSON.parse(raw) as Frame;
+      onMessage?.(frame);
       if (frame.type === "pane-geometry") grids.push(frame);
       if (frame.type === "pty-data") frames.push(frame);
       for (const waiter of waiters.filter((entry) => frames.length >= entry.count)) waiter.done();
@@ -86,12 +87,12 @@ function recorder() {
   return { client, frames, grids, until };
 }
 
-function registryFor(clients: Client[], nativeControl?: (socket: string) => Promise<string | null>) {
+function registryFor(clients: Client[], nativeControl?: (socket: string) => Promise<string | null>, holdPending = (_client: Client, _pane?: string) => {}) {
   return createTerminalRegistry({
     options: {}, clients: new Set(clients), stopped: () => false,
     terminalAttach: async () => false, nativeControl,
     holdFor: 0, heldRetry: 0, retryFor: 0, relookupFor: 0,
-    holdPending() {}, holdPendingPane() {}, attached() {}, inputReady() {}, end() {},
+    holdPending, holdPendingPane() {}, attached() {}, inputReady() {}, end() {},
   });
 }
 
@@ -126,7 +127,10 @@ if (process.argv.includes("--takeover")) process.exit(1);
 console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
 for await (const _ of console) {}
 `, { mode: 0o700 });
-  const a = recorder(), b = recorder();
+  const resumedMirror = Promise.withResolvers<void>();
+  const a = recorder(), b = recorder(frame => {
+    if (frame.type === "input-ready" && frame.ready !== false && registry.sight(b.client, "p").facts().mirror) resumedMirror.resolve();
+  });
   const registry = registryFor([a.client, b.client], async () => command);
   const f = registry.terminalFrames;
   const claim = { ...attach, windows_fit: true };
@@ -152,10 +156,61 @@ for await (const _ of console) {}
     expect(owned.write("retired")).toBe(false);
     const second = registry.sight(b.client, "p");
     expect(second.facts().ready).toBe(true);
+    f.detach(a.client, { type: "detach", pane_id: "p" });
     registry.releaseFit(b.client);
     expect(second.write("demoted")).toBe(false);
+    await resumedMirror.promise;
     await f.resize(b.client, { type: "resize", pane_id: "p", cols: 42, rows: 14 });
-    expect(second.facts().samePty).toBe(false);
+    expect(registry.sight(b.client, "p").facts()).toMatchObject({ mirror: true, ready: true });
+  } finally { registry.closeAttachment("p"); }
+});
+
+it.skipIf(process.platform === "win32")("retries an unconfirmed failure and hands a released lease to a waiting viewer without takeover", async () => {
+  const command = join(root, "flaky-control");
+  writeFileSync(command, `#!${process.execPath}
+import { appendFileSync, existsSync } from "node:fs";
+const log = import.meta.path + ".attempts", first = !existsSync(log);
+appendFileSync(log, process.argv.includes("--takeover") ? "takeover\\n" : "ordinary\\n");
+if (first) process.exit(1);
+if (process.argv.includes("51")) {
+  console.log(JSON.stringify({type:"terminal.closed",reason:"already has an attached client"}));
+  process.exit(0);
+}
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+for await (const _ of console) process.exit(1);
+`, { mode: 0o700 });
+  const resumed = Promise.withResolvers<void>();
+  const a = recorder(), b = recorder(frame => { if (frame.type === "attach-resumed") resumed.resolve(); });
+  let refusals = 0;
+  const externalHeld = Promise.withResolvers<void>();
+  const c = recorder(frame => {
+    if (frame.code === "attach_held" && ++refusals === 2) externalHeld.resolve();
+  });
+  let leaveDuringRetirement = false;
+  const registry = registryFor([a.client, b.client, c.client], async () => command, client => {
+    if (client === a.client && leaveDuringRetirement) {
+      leaveDuringRetirement = false;
+      queueMicrotask(() => registry.terminalFrames.detach(a.client, { type: "detach", pane_id: "p" }));
+    }
+  });
+  const claim = { ...attach, windows_fit: true };
+  try {
+    await registry.terminalFrames.attach(a.client, claim);
+    await a.until(1);
+    expect(registry.sight(a.client, "p").facts().ready).toBe(true);
+    expect(registry.sight(a.client, "p").write("end recovered session")).toBe(true);
+    await a.until(2);
+    await registry.terminalFrames.attach(b.client, claim);
+    expect(registry.sight(b.client, "p").write("held")).toBe(false);
+    leaveDuringRetirement = true;
+    expect(registry.sight(a.client, "p").write("end before owner leaves")).toBe(true);
+    await resumed.promise;
+    expect(registry.sight(b.client, "p").facts()).toMatchObject({ ready: true, currentHeld: false, mirror: false });
+    await registry.terminalFrames.attach(c.client, { ...claim, cols: 51 });
+    registry.terminalFrames.detach(b.client, { type: "detach", pane_id: "p" });
+    await externalHeld.promise;
+    expect(registry.sight(c.client, "p").write("external holder")).toBe(false);
+    expect(readFileSync(`${command}.attempts`, "utf8").trim().split("\n")).toEqual(Array(5).fill("ordinary"));
   } finally { registry.closeAttachment("p"); }
 });
 

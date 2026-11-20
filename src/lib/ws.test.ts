@@ -818,7 +818,13 @@ it("requests a fresh native fit after release, never by an observer or a replaye
   try {
     const pane = "w1:p1";
     client.attach(pane, 40, 15, true, true);
+    client.resize(pane, 51, 18);
+    expect(socket.sent.at(-1)).toMatchObject({ type: "resize", cols: 51, rows: 18 });
+    socket.open();
+    expect(socket.sent.at(-2)).toMatchObject({ type: "attach", keep_size: true, windows_fit: true });
+    expect(socket.sent.at(-1)).toMatchObject({ type: "resize", cols: 51, rows: 18 });
     socket.receive({ type: "pane-geometry", pane_id: pane, cols: 120, rows: 40, fixed: true, windows_fit: true });
+    expect(client.canRequestWindowsFit(pane)).toBe(true);
     client.resize(pane, 51, 18);
     expect(socket.sent.at(-1)).toMatchObject({ type: "attach", pane_id: pane, cols: 51, rows: 18, windows_fit: true });
     socket.receive({ type: "pane-geometry", pane_id: pane, cols: 51, rows: 18, fixed: false, windows_fit: true });

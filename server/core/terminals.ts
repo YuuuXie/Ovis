@@ -132,7 +132,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
 
   const { spawnAttachment } = createSpawnAttachment({ herdrFailure: options.herdrFailure, attachments, retiringAttachments, terminalAttach, nativeControl, isStopped: stopped, closeAttachment, broadcast, sendOutput, reconcileOutput, holdPendingPane, inputReady, holdFor, heldRetry, retryFor, relookupFor });
 
-  function retireFit(pane: string, a: MirrorAttachment, owner?: Client): void {
+  function retireFit(pane: string, a: MirrorAttachment, owner?: Client, afterFailure?: () => void): void {
     const fit = a.fit, lease = fit?.lease;
     if (!fit || !lease || (owner && owner !== lease.owner)) return;
     delete fit.lease;
@@ -143,8 +143,11 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     const resumeMirror = () => {
       if (attachments.get(pane) !== a || fit.lease || fit.retiring) return;
       a.process.suspendScreen(false);
+      if (afterFailure) afterFailure();
+      else resumeWaiting(pane, a);
+      if (fit.lease) return;
       for (const member of a.clients) {
-        if (!fit.externallyHeld && !fit.blocked.has(member) && connectionOf(member).mode === "interact")
+        if (!fit.slot && !fit.blocked.has(member) && connectionOf(member).mode === "interact")
           send(member, { type: "input-ready", pane_id: pane });
       }
     };
@@ -155,22 +158,30 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       });
       fit.retiring = retired;
       lease.session.kill();
-    } else resumeMirror();
+    } else queueMicrotask(resumeMirror);
   }
 
-  function fitHeld(a: MirrorAttachment, client: Client, pane: string): void {
-    a.fit!.blocked.add(client);
+  function fitHeld(a: MirrorAttachment, client: Client, pane: string, holder: "local" | "external"): void {
+    a.fit!.blocked.set(client, holder);
     holdPending(client, pane);
     send(client, { type: "error", code: "attach_held", message: ATTACH_HELD_MESSAGE, pane_id: pane });
   }
 
-  function fitPane(pane: string, a: MirrorAttachment, owner: Client, takeover = false): void {
+  function resumeWaiting(pane: string, a: MirrorAttachment): void {
+    for (const [waiting, holder] of a.fit!.blocked) {
+      if (holder === "retrying") continue;
+      fitPane(pane, a, waiting);
+      if (a.fit!.lease) break;
+    }
+  }
+
+  function fitPane(pane: string, a: MirrorAttachment, owner: Client, takeover = false, retryFailure = true): void {
     const fit = a.fit, claim = owner.data.attached.get(pane);
     if (!fit || !claim?.fitGrid?.drives || claim.keepSize || !a.clients.has(owner) || owner.data.readOnly
       || connectionOf(owner).closing || connectionOf(owner).mode !== "interact") return;
     if (takeover && !fit.blocked.has(owner)) return;
     if (!takeover && fit.lease && fit.lease.owner !== owner) {
-      fitHeld(a, owner, pane);
+      fitHeld(a, owner, pane, "local");
       return;
     }
     if (fit.lease?.owner === owner) {
@@ -183,9 +194,10 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     }
     // Taking our own slot needs no --takeover after release. If a third party gets it
     // in the gap, that is a different holder, not the one the user asked to displace.
-    const takeExternal = takeover && !fit.lease;
+    const takeExternal = takeover && !fit.lease && fit.slot === "held" && fit.blocked.get(owner) === "external";
+    if (fit.blocked.has(owner)) fit.blocked.set(owner, "retrying");
     if (fit.lease) {
-      fitHeld(a, fit.lease.owner, pane);
+      fitHeld(a, fit.lease.owner, pane, "local");
       retireFit(pane, a);
     }
     const lease: NonNullable<typeof fit.lease> = { owner, granted: false, cols: claim.fitGrid.cols, rows: claim.fitGrid.rows };
@@ -199,14 +211,19 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     }
     const failed = (held: boolean) => {
       if (!valid()) return;
-      fit.externallyHeld = true;
-      retireFit(pane, a, owner);
-      // A claim that failed or was displaced never falls back to writing around the holder by RPC.
-      if (held) fitHeld(a, owner, pane);
-      else {
-        fit.blocked.add(owner);
+      fit.slot = held ? "held" : "uncertain";
+      if (held) fitHeld(a, owner, pane, "external");
+      else if (!retryFailure && !lease.granted) {
         send(owner, { type: "error", code: "attach_failed", pane_id: pane, message: "The Windows terminal control session ended." });
       }
+      retireFit(pane, a, owner, () => {
+        // A lost stream doesn't prove contention or a free slot. Probe once with
+        // the still-current claim, never replay a takeover or bypass it with RPC.
+        if (held) return;
+        if ((retryFailure || lease.granted) && owner.data.attached.get(pane) === claim)
+          fitPane(pane, a, owner, false, false);
+        if (!fit.lease) resumeWaiting(pane, a);
+      });
     };
     const start = () => {
       if (!valid()) return;
@@ -218,7 +235,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
             if (!valid()) return;
             const first = !lease.granted;
             lease.granted = true;
-            fit.externallyHeld = false;
+            delete fit.slot;
             if (first || a.cols !== grid.cols || a.rows !== grid.rows) {
               a.cols = grid.cols; a.rows = grid.rows;
               for (const member of a.clients) send(member, { type: "pane-geometry", pane_id: pane, ...grid, fixed: member !== owner, windows_fit: true });
@@ -446,7 +463,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
         const now = attachments.get(paneId);
         const facts = sightingFacts(seen, { attachment: now, claim: client.data.attached.get(paneId) }, client);
         const active = now?.kind === "mirror" ? now.fit : undefined;
-        if (active && (active.lease || active.retiring || active.externallyHeld || active.blocked.has(client) || active.epoch !== epoch)) {
+        if (active && (active.lease || active.retiring || active.slot || active.blocked.has(client) || active.epoch !== epoch)) {
           const own = active.lease?.owner === client && active.lease.granted;
           facts.samePty &&= active === fit && active.epoch === epoch;
           facts.sameClaim &&= facts.samePty;
@@ -458,7 +475,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
         return facts;
       },
       write: (data, automatic) => {
-        if (fit && (fit.epoch !== epoch || fit.retiring || fit.externallyHeld || fit.blocked.has(client))) return false;
+        if (fit && (fit.epoch !== epoch || fit.retiring || fit.slot || fit.blocked.has(client))) return false;
         if (lease) return fit?.lease === lease && lease.owner === client && lease.session?.write(data) === true;
         return process instanceof CoreAttachSession ? process.write(data, automatic) : process!.write(data);
       },
@@ -566,7 +583,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       reconcileOutput(message.pane_id);
       if (connectionOf(client).closing) return;
       if (attachment.ready && !attachment.held && (!fitting || (fitting.owner === client && fitting.granted))
-        && !(attachment.kind === "mirror" && (attachment.fit?.retiring || attachment.fit?.externallyHeld || attachment.fit?.blocked.has(client))))
+        && !(attachment.kind === "mirror" && (attachment.fit?.retiring || attachment.fit?.slot || attachment.fit?.blocked.has(client))))
         send(client, { type: "input-ready", pane_id: message.pane_id });
       if (!alreadyAttached) attached(client, message.pane_id);
       if (attachment.kind === "mirror") return;

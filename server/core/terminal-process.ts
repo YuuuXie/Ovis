@@ -182,8 +182,8 @@ export interface MirrorAttachment extends AttachmentState {
     lease?: { owner: Client; session?: WindowsControl; granted: boolean; cols: number; rows: number };
     retiring?: Promise<void>;
     epoch: number;
-    externallyHeld?: boolean;
-    blocked: Set<Client>;
+    slot?: "held" | "uncertain";
+    blocked: Map<Client, "local" | "external" | "retrying">;
     passiveMirrors: Set<Client>;
   };
 }
@@ -257,7 +257,7 @@ export function createSpawnAttachment({ attachments, retiringAttachments, termin
       const command = nativeControl ? await nativeControl(socket) : null;
       if (isStopped()) throw new HerdrError("server_stopped", "the web bridge stopped during attachment creation");
       const attachment: MirrorAttachment = { kind: "mirror", ready: true, process: undefined as unknown as MirrorSession, unscreened: new Set(), ...state };
-      if (command) attachment.fit = { command, terminal: terminalId, socket, epoch: 0, blocked: new Set(), passiveMirrors: new Set() };
+      if (command) attachment.fit = { command, terminal: terminalId, socket, epoch: 0, blocked: new Map(), passiveMirrors: new Set() };
       attachments.set(paneId, attachment);
       const mirror = new MirrorSession({
         cols: spawnCols,

@@ -93,6 +93,7 @@ interface AttachState {
   releaseSizeOwed: boolean;
   windowsFit: boolean;
   fitOffered?: boolean;
+  pendingKeptFit?: boolean;
 }
 
 function defaultUrl(): string {
@@ -363,7 +364,9 @@ export class HerdrSocket {
       for (const [paneId, state] of this.attached) {
         state.releaseSizeOwed = !state.keepSize;
         delete state.fitOffered;
-        this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", ...(state.windowsFit ? { windows_fit: true } : {}), receipt_resume_id: receiptResumeId(), ...(state.keepSize ? { keep_size: true } : {}) });
+        this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", ...(state.windowsFit ? { windows_fit: true } : {}), receipt_resume_id: receiptResumeId(), ...(state.keepSize || state.pendingKeptFit ? { keep_size: true } : {}) });
+        if (state.pendingKeptFit && !state.keepSize && this.mode === "interact")
+          this.rawSend({ type: "resize", pane_id: paneId, cols: state.cols, rows: state.rows });
       }
     });
 
@@ -392,7 +395,14 @@ export class HerdrSocket {
       // waking pending submits or notifying UI handlers about the acknowledged role.
       if (message.type === "pane-geometry" && message.windows_fit) {
         const state = this.attached.get(message.pane_id);
-        if (state) state.fitOffered = true;
+        if (state) {
+          if (state.pendingKeptFit && message.fixed) {
+            state.keepSize = true;
+            state.releaseSizeOwed = false;
+          }
+          delete state.pendingKeptFit;
+          state.fitOffered = true;
+        }
       }
       if (message.type === "role-ack") {
         this.mode = message.mode; this.roleChanges += 1;
@@ -919,6 +929,9 @@ export class HerdrSocket {
     }
     state.cols = cols;
     state.rows = rows;
+    // An ordinary PTY takes this resize; a kept Windows mirror ignores it.
+    // Remember the latter's claim until its capability frame arrives.
+    if (state.windowsFit && !state.fitOffered && state.keepSize) state.pendingKeptFit = true;
     state.keepSize = false;
     state.releaseSizeOwed = true;
     this.send({ type: "resize", pane_id: paneId, cols, rows });
