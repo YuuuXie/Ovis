@@ -1,12 +1,11 @@
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
-import { ALargeSmall, AppWindow, ArrowDownUp, ArrowLeftRight, ArrowLeft, AudioLines, Bell, Bot, Box, Brain, ChevronLeft, ChevronRight, CircleDot, ClipboardCopy, ClipboardPaste, Command, CornerDownLeft, ExternalLink, FileClock, FilePen, Filter, FlaskConical, Gauge, Globe, Image as ImageIcon, Inbox, Info, Keyboard, Languages, Layers, ListCollapse, ListTree, Lock, MessageSquare, MessageSquareReply, MessagesSquare, Mic, Monitor, Mouse, MousePointer2, MoveHorizontal, Palette, PanelLeft, PanelRight, Plus, Puzzle, Rows3, Search, Send, Server, Shapes, Smartphone, Sparkles, SquareTerminal, Star, SunMoon, Tag, Tags, TextCursorInput, Trash2, Type, Volume2, WandSparkles, WrapText, X, type LucideIcon } from "lucide-react";
+import { ALargeSmall, AppWindow, ArrowDownUp, ArrowLeftRight, ArrowLeft, AudioLines, Bell, Bot, Box, Brain, ChevronLeft, ChevronRight, CircleDot, ClipboardCopy, ClipboardPaste, Command, CornerDownLeft, ExternalLink as ExternalLinkIcon, FileClock, FilePen, Filter, FlaskConical, Gauge, Globe, Image as ImageIcon, Inbox, Info, Keyboard, Languages, Layers, ListCollapse, ListTree, Lock, MessageSquare, MessageSquareReply, MessagesSquare, Mic, Monitor, Mouse, MousePointer2, MoveHorizontal, Palette, PanelLeft, PanelRight, Plus, Puzzle, Rows3, Search, Send, Server, Shapes, Smartphone, Sparkles, SquareTerminal, Star, SunMoon, Tag, Tags, TextCursorInput, Trash2, Type, Volume2, WandSparkles, WrapText, X, type LucideIcon } from "lucide-react";
 
 import "./SettingsDialog.css";
 
 import type { AddPcPreset, AppActions } from "../lib/actions.ts";
 import { useInstallPrompt } from "../lib/install.ts";
 import { changePc, inNativeApp } from "../lib/nativeApp.ts";
-import { canReuseExternalLinkTab } from "../lib/terminalFileLinks.ts";
 import { loadRelayShell } from "../lib/relay.ts";
 import { inRelayShell, useRelay, type RelayState } from "../lib/useRelay.ts";
 import { serverIdOfPath, shellMode } from "../lib/shellMode.ts";
@@ -39,7 +38,7 @@ import { UI_FONT_MAX, UI_FONT_MIN, UI_FONT_PRESET_FAMILY, uiFontPreset, type UiF
 import { canListInstalledFonts, filterFamilies, isMonospaceFamily, queryInstalledFonts } from "../lib/installedFonts.ts";
 import type { UpdatesModel } from "../lib/updates.ts";
 import type { UserError } from "../lib/userError.ts";
-import { LOCAL_MACHINE, pcAlertKey, type HerdrCoreFacts, type HerdrRuntimeFacts, type Machine, type MachineSettings, type RuntimeName } from "../../shared/machines.ts";
+import { LOCAL_MACHINE, pairedPc, pcAlertKey, type HerdrCoreFacts, type HerdrRuntimeFacts, type Machine, type MachineSettings, type RuntimeName } from "../../shared/machines.ts";
 import { canHideMachine, isMachineShown, setHiddenMachines, useHiddenMachines, withMachineHidden } from "../lib/hiddenMachines.ts";
 import { alertFiltersChanged, updateAlertFilters, useAlertFilters } from "../lib/alertFilters.ts";
 import { alertMeWhenChips } from "./AlertChips.tsx";
@@ -58,7 +57,7 @@ import { SignOutRow } from "./SignOutRow.tsx";
 import { failureText, openOwnOffer, RelayDirectRow, statusText } from "./RelayPanel.tsx";
 import { AccountSection, accountServiceHere, type AccountState } from "./AccountSection.tsx";
 import { AccountPcRows, NoAccountPcHint, removePcFromAccount } from "./AccountPcs.tsx";
-import { DRAWER_QUERY, leavePcList, pcListExit, STATE_WORD } from "./MachineSidebar.tsx";
+import { DRAWER_QUERY, leavePcList, pcListExit, removablePc, STATE_WORD } from "./MachineSidebar.tsx";
 import { pcAccountStatus } from "../lib/account/join.ts";
 import { AccountService } from "../lib/account/service.ts";
 import { indexedAccountStore } from "../lib/account/store.ts";
@@ -81,6 +80,7 @@ import { RenderBoundary } from "./RenderBoundary.tsx";
 import { requestedSettingsPage, requestSettingsPage, type SettingsPageId } from "../lib/paletteSettings.ts";
 import { currentSettingsPage } from "../lib/deepLink.ts";
 import { HERDR_WINDOW_CHOICES, type HerdrWindowChoice } from "../lib/herdrWindow.ts";
+import { canReuseExternalLinkTab, ExternalLink } from "../lib/externalLink.ts";
 
 export interface SettingsDialogProps {
   open: boolean;
@@ -635,7 +635,7 @@ function ChatPage() {
             <Toggle label={t("Reopen files on return")} checked={settings.reopenFileOnReturn} onChange={(reopenFileOnReturn) => update({ reopenFileOnReturn })} />
           </SettingsRow>
           <FilesPanelRow />
-          {canReuseExternalLinkTab() && <SettingsRow icon={ExternalLink} label={t("Reuse tab for external links")} description={t("Links that open outside Ovis reuse one browser tab and do not open a new one each time.")} reset={["reuseExternalLinkTab"]}
+          {canReuseExternalLinkTab() && <SettingsRow icon={ExternalLinkIcon} label={t("Reuse tab for external links")} description={t("Links that open outside Ovis reuse one browser tab and do not open a new one each time.")} reset={["reuseExternalLinkTab"]}
             condition={<span className="settings-condition">{t("The site in that tab can see and navigate this Ovis tab.")}</span>}>
             <Toggle label={t("Reuse tab for external links")} checked={settings.reuseExternalLinkTab} onChange={(reuseExternalLinkTab) => update({ reuseExternalLinkTab })} />
           </SettingsRow>}
@@ -1365,8 +1365,6 @@ function RelayControls({ relay, closesGate, onReset }: { relay: RelayState; clos
   );
 }
 
-const removablePc = (machine: Machine): boolean => machine.state !== "connected" && machine.herdr_profile_id === undefined && (machine.kind === "ssh" || machine.kind === "relay");
-
 function MyPcRows({ machines, account, accountPcs, onAccountChanged, relayKey, watching, selfAction, children }: { machines: readonly Machine[]; accountPcs: readonly MyPc[] | null; relayKey: string;
   account: string | null;
   onAccountChanged: () => void;
@@ -1418,7 +1416,7 @@ function MyPcRows({ machines, account, accountPcs, onAccountChanged, relayKey, w
       {account !== null && <AccountPcRows pcs={fromAccount} watching={watching} onRemoved={onAccountChanged}
         remove={(serverId) => removePcFromAccount(new AccountService({ store: indexedAccountStore }), account, serverId)} />}
     </ul>
-    {removing !== null && <ConfirmDialog title={t("Remove PC {name}?", { name: removing.name })} body={t(removing.kind === "relay" ? "Removes this PC here. To end its access too, revoke it under Phone & devices on that PC." : "Removes this registration. Remote sessions keep running.")} confirmLabel={t("Remove PC")}
+    {removing !== null && <ConfirmDialog title={t("Remove PC {name}?", { name: removing.name })} body={t(pairedPc(removing) ? "Removes this PC here. To end its access too, revoke it under Phone & devices on that PC." : "Removes this registration. Remote sessions keep running.")} confirmLabel={t("Remove PC")}
       onConfirm={async () => { await machineRequest(`/${encodeURIComponent(removing.id)}`, "DELETE"); setRemoving(null); }} onClose={() => setRemoving(null)} />}
     </>
   );
@@ -1539,7 +1537,7 @@ function RuntimeFacts({ version, runtime, core, facts: healthFacts, bootId, onSe
     : facts?.locked === "env" ? t("OVIS_RUNTIME in Ovis's environment decides which terminals this PC shows; change it there to switch.")
     // where the OS does not serve herdr-core, setting OVIS_RUNTIME=herdr-core would stop Ovis: no how-to
     : target !== null || onCore || !core?.version || facts?.locked === "platform" ? null
-    : <span>{t("The Herdr app's core (hc {version}) is on this PC too. Ovis can show its terminals instead of herdr's.", { version: core.version })} <a className="settings-link" href={RUNTIME_HELP} target="_blank" rel="noreferrer">{t("How to switch")}</a></span>;
+    : <span>{t("The Herdr app's core (hc {version}) is on this PC too. Ovis can show its terminals instead of herdr's.", { version: core.version })} <ExternalLink kind="link" className="settings-link" href={RUNTIME_HELP}>{t("How to switch")}</ExternalLink></span>;
   const toCore = target === "herdr-core";
   const coreInstalled = core?.version != null;
   const tuiInstalled = facts?.tui.installed ?? !onCore;
@@ -1604,15 +1602,15 @@ function AboutPage({ updates, herdrVersion, herdrRuntime, herdrCore, herdrRuntim
       <SettingsGroup title={t("About")} className="settings-about" section="about">
         <div className="settings-row">
           <div className="settings-row-text">
-            <span className="settings-label-line"><Globe className="settings-row-icon" aria-hidden="true" /><a className="settings-link" href="https://ovis.sh/" target="_blank" rel="noreferrer">ovis.sh</a></span>
+            <span className="settings-label-line"><Globe className="settings-row-icon" aria-hidden="true" /><ExternalLink kind="link" className="settings-link" href="https://ovis.sh/">ovis.sh</ExternalLink></span>
           </div>
-          <a className="btn" href="https://github.com/devswha/ovis" target="_blank" rel="noreferrer"><Star aria-hidden="true" />{t("Star on GitHub")}</a>
+          <ExternalLink kind="link" className="btn" href="https://github.com/devswha/ovis"><Star aria-hidden="true" />{t("Star on GitHub")}</ExternalLink>
         </div>
         <div className="settings-row">
           <div className="settings-row-text">
             <span className="settings-label-line"><MessagesSquare className="settings-row-icon" aria-hidden="true" />{t("Questions and chat")}</span>
           </div>
-          <a className="btn" href="https://ovis.sh/discord" target="_blank" rel="noreferrer">{t("Join Discord")}</a>
+          <ExternalLink kind="link" className="btn" href="https://ovis.sh/discord">{t("Join Discord")}</ExternalLink>
         </div>
       </SettingsGroup>
     </SettingsBare.Provider>

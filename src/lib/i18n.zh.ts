@@ -19,6 +19,7 @@ import { UPDATES_ZH } from "./i18n/updates.zh.ts";
 import { PALETTE_ZH } from "./i18n/palette.zh.ts";
 import { RELAY_ZH } from "./i18n/relay.zh.ts";
 import { DASHBOARD_ZH } from "./i18n/dashboard.zh.ts";
+import { MY_MACHINES_ZH } from "./i18n/my-machines.zh.ts";
 import { RUNTIME_MOVE_ZH } from "./i18n/runtime-move.zh.ts";
 
 /**
@@ -81,7 +82,8 @@ const BASE: Record<string, string> = {
   "This account service can't sign in a browser on this PC yet.": "此账户服务暂不支持在这台 PC 的浏览器中登录。",
   "Your sign-in ended. Sign in again to see every PC of your account.": "登录已失效。请重新登录以查看账户中的所有 PC。",
   "The account service could not be reached. The PCs this device is paired with still work.": "无法连接账户服务。已与此设备配对的 PC 仍可正常使用。",
-  "Add {device}?": "添加 {device}？",
+  "Add a new device?": "要添加新设备吗？",
+  "Check the number, then approve": "核对数字后再批准",
   "Through {pc} · joins your {n} PCs": "经由 {pc} · 将加入你的 {n} 台 PC",
   "Pick the number on {device}": "选择 {device} 上显示的数字",
   "Approve only if you started this yourself just now. Didn't ask for it? Deny it.": "仅在你刚刚亲自发起时才批准。如果不是你发起的，请拒绝。",
@@ -238,6 +240,9 @@ const BASE: Record<string, string> = {
   "{n} ms": "{n} ms",
   "Check now": "立即检查",
   "Check again": "重新检查",
+  "Other PCs": "其他电脑",
+  "Unnamed PC": "未命名的电脑",
+  "Off|pc state": "已关闭",
   "Checking…": "正在检查…",
   "relay": "中继",
   "direct": "直连",
@@ -299,6 +304,7 @@ const BASE: Record<string, string> = {
   "Paired: {name}.": "已配对：{name}。",
   "QR code that pairs a phone with code {code}": "使用代码 {code} 配对手机的二维码",
   "Pairing code": "配对码",
+  "Needs HTTPS or localhost.": "需要 HTTPS 或 localhost。",
   "{agent} is ready": "{agent} 已就绪",
 
 
@@ -504,7 +510,6 @@ const BASE: Record<string, string> = {
   "Paste and send": "粘贴并发送",
   "Conversation": "对话",
   "Off": "关闭",
-  "Pair with a QR or code": "使用二维码或配对码配对",
   "Add this PC": "添加此电脑",
   "Pair with {name}?": "与 {name} 配对？",
   "Pair": "配对",
@@ -520,6 +525,7 @@ const BASE: Record<string, string> = {
   "Offline": "离线",
   "Update Ovis on it": "需要更新 Ovis",
   "Open": "打开",
+  "Add a PC": "添加电脑",
   "Relay": "中继",
   "Add": "添加",
   "Update": "更新",
@@ -535,7 +541,6 @@ const BASE: Record<string, string> = {
   "Removes this registration. Remote sessions keep running.": "仅移除此注册。远程会话会继续运行。",
   "Removes this PC here. To end its access too, revoke it under Phone & devices on that PC.": "仅从这台 PC 移除。要同时取消它的访问权限，请在那台 PC 的 手机和设备 中撤销。",
   "Added": "新增",
-  "Sign in to Ovis": "登录 Ovis",
   "Theme": "主题",
   "Dark": "深色",
   "Light": "浅色",
@@ -550,11 +555,15 @@ const BASE: Record<string, string> = {
   "Forget this PC?": "忘记这台电脑？",
   "This phone's key for it is deleted here, and the PC keeps listing this phone until it is revoked there. Pairing again takes a new QR code from the PC.": "此手机上的对应密钥将被删除；在电脑上撤销之前，它仍会列出这部手机。重新配对需要电脑上新的二维码。",
   "Forget": "忘记",
-  "Offline · {when}": "离线 · {when}",
-  "The PC is off, or Ovis is not running on it.": "电脑已关机，或其上的 Ovis 未运行。",
-  "The relay did not answer. Check this device's network.": "中继没有响应。请检查此设备的网络。",
   "No answer": "无响应",
   "Ready · not in the account yet": "就绪 · 尚未加入账户",
+  "Machine offline": "机器离线",
+  "Could not reach this machine": "无法连接此机器",
+  "Switched off": "已关机",
+  "{name} answered but did not finish connecting in time. It may be busy or restarting. Try again; if it keeps happening, restart Ovis on {name}.": "{name} 有响应，但没有及时完成连接。它可能正忙或正在重启。请重试；如果一直这样，请在 {name} 上重启 Ovis。",
+  "Last seen {when}.": "上次在线：{when}。",
+  "It is off, has no network, or Ovis is not running on it.": "它已关机、没有网络，或者其上的 Ovis 没有运行。",
+  "This device could not reach the relay. Check this device's network.": "此设备无法连接中继。请检查此设备的网络。",
   "Account setup is incomplete.": "账户设置尚未完成。",
   "Adding it to your account…": "正在添加到账户…",
   "{name} is ready to open on this device.": "此设备已准备好打开 {name}。",
@@ -633,6 +642,7 @@ export const ZH_PARTS: Record<string, Record<string, string>> = {
   palette: PALETTE_ZH,
   relay: RELAY_ZH,
   dashboard: DASHBOARD_ZH,
+  "my-machines": MY_MACHINES_ZH,
   "runtime-move": RUNTIME_MOVE_ZH,
 };
 

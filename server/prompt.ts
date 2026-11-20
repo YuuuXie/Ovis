@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { HerdrPane, InteractivePrompt, PanePromptResponse, PromptAnswer, SessionSnapshot, SlashCommand } from "../shared/protocol.ts";
+import { labelledAgent } from "../shared/supported-agents.ts";
 import { builtinCommands, cachedPaneCommands } from "./commands.ts";
 import { piRecordText } from "./pi-delivery.ts";
 import { agentProcesses, ompTranscriptPath, paneRunsOmo, readCommandTranscript } from "./conversation.ts";
@@ -667,7 +668,7 @@ async function readPrompt(paneId: string, codexHome?: string, openCodeStateDir?:
   openCodeState.reconcile(panes, before);
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (!pane) throw new HerdrError("pane_not_found", `pane ${paneId} not found`);
-  const agent = pane.agent ?? "";
+  const agent = labelledAgent(pane.agent) ?? "";
   const status = pane.agent_status;
   const turns = answerTurns.get(paneId) ?? 0;
   const known = await readKnownPrompt(paneId, pane, agent, codexHome, panes, openCodeStateDir, openCodeState, signal, true);
@@ -1350,13 +1351,64 @@ export async function currentPrompt(paneId: string, options: { codexHome?: strin
  * an answer stands on.
  */
 export async function shownPromptText(pane: HerdrPane, panes: HerdrPane[], options: { codexHome?: string; openCodeStateDir?: string; openCodeState: OpenCodePromptState; ompLookups: OmpLookups; answers?: OpenCodePromptState }): Promise<string | null | undefined> {
-  if (pane.agent === "pi") return undefined;
-  const agent = pane.agent ?? "";
+  const agent = labelledAgent(pane.agent) ?? "";
+  if (agent === "pi") return undefined;
   const known = await readKnownPrompt(pane.pane_id, pane, agent, options.codexHome, panes, options.openCodeStateDir, options.openCodeState, undefined, false, false, options.ompLookups);
   if (known.stale) return undefined;
   const shown = contentId(known.prompt ?? (await fallbackCard(pane.pane_id, agent, pane.agent_status, known))?.prompt ?? null) ?? null;
   const draft = agent === "opencode" ? (options.answers ?? defaultOpenCodeState).entries.get(pane.pane_id)?.draft : undefined;
   return shown !== null && draft ? `${shown}\0${JSON.stringify(draft)}` : shown;
+}
+
+/**
+ * The readers whose card is the agent asking its user something it waits on: a permission, a question, a plan to
+ * approve, a confirmation or a menu it opened by itself (Claude's folder trust, Codex's continue menu). Not a picker
+ * the user opened (a `/model` or `/effort` list, Claude's goal dialog), not a held message, and never a fallback card,
+ * which only stands for a status someone reported. pi is not read here (shownPromptText).
+ */
+const WAITING_RESPONDERS: ReadonlySet<string> = new Set([
+  "claude-approval", "claude-confirm", "claude-plan", "claude-question", "claude-submit", "cmd-question",
+  "codex-approval", "codex-question", "codex-async-question", "codex-queued-question", "codex-menu",
+  "agy-question", "hermes-approval", "hermes-question", "hermes-input", "omo-question", "omo-review", "omo-pending",
+  "omp-approval", "omp-question", "omp-submit", "opencode-v1-question", "opencode-question",
+]);
+
+/** What the waiting a card stands for is about, in the words an agent's own report uses (`kind`); null: it does not say. */
+export function waitingKindOf(prompt: InteractivePrompt): "permission" | "question" | null | undefined {
+  if (!WAITING_RESPONDERS.has(parsedByPublicPrompt.get(prompt)?.responder ?? "")) return undefined;
+  return prompt.kind === "approval" || prompt.kind === "plan" ? "permission" : prompt.kind === "question" ? "question" : null;
+}
+
+/**
+ * Whether the agent on a pane's screen waits for its user (server/card-waits.ts): the kind of the card a reader
+ * returns for it now, null when no such card shows, undefined when the read says nothing (it raced a change, or
+ * failed). OpenCode's form kept from a lookup that no longer answers is such a read: the card stays for its user,
+ * but whether it is still asked is not known. Read with the caller's own OpenCode and omp state, so it starts and
+ * ends no asking.
+ */
+export async function waitingCard(pane: HerdrPane, panes: HerdrPane[], options: { codexHome?: string; openCodeStateDir?: string; openCodeState: OpenCodePromptState; ompLookups: OmpLookups }): Promise<{ kind: "permission" | "question" | null; id: string } | null | undefined> {
+  const agent = pane.agent;
+  if (!agent || agent === "pi") return undefined;
+  const known = await readKnownPrompt(pane.pane_id, pane, agent, options.codexHome, panes, options.openCodeStateDir, options.openCodeState, undefined, false, false, options.ompLookups).catch(() => undefined);
+  if (known === undefined || known.stale || known.inputUnverified) return undefined;
+  if (!known.prompt) return null;
+  if (parsedByPublicPrompt.get(known.prompt)?.openCodeForm?.available === false) return undefined;
+  const kind = waitingKindOf(known.prompt);
+  const id = contentId(known.prompt);
+  return kind === undefined || id === undefined ? null : { kind, id };
+}
+
+type AnsweringListener = (paneId: string) => (delivered: boolean) => void;
+const answeringListeners = new Set<AnsweringListener>();
+/**
+ * Told the pane as an answer from a card's button begins (POST /api/pane/prompt/answer), before anything is read or
+ * typed for it. What the listener gives back is told once that answer ended, whether it was delivered to a card the agent
+ * waits on (`waitingKindOf`): never true for a picker the user opened or a fallback card. By then its form has settled
+ * and the pane may show its next card, so what the answer was for is the listener's to note as it begins.
+ */
+export function onPromptAnswering(listener: AnsweringListener): () => void {
+  answeringListeners.add(listener);
+  return () => { answeringListeners.delete(listener); };
 }
 
 const SUGGESTION_PARSERS: Readonly<Record<string, (ansi: string) => string | null>> = {
@@ -1369,6 +1421,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
   if (url.pathname !== "/api/pane/prompt" && url.pathname !== "/api/pane/prompt/answer") return null;
   setRequestRoute(url.pathname);
   let answerLog: { paneId: string; matched: boolean } | null = null;
+  /** the answering listeners told of this answer, to be told its end */
+  const answering: ((delivered: boolean) => void)[] = [];
+  /** keys for this answer went to the pane: also where something after them failed */
+  let delivered = false;
+  /** the card it matched is one the agent waits on */
+  let waitedOn = false;
   try {
     if (url.pathname === "/api/pane/prompt") {
       if (request.method !== "GET") return badRequest("method_not_allowed", "GET is required.");
@@ -1428,7 +1486,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     const form: { still?: (prompt: InteractivePrompt | null) => boolean } = {};
     const log = { paneId: body.pane_id, matched: false };
     answerLog = log;
-    let delivered = false;
+    for (const listener of answeringListeners) answering.push(listener(body.pane_id));
     const response = await serialize(body.pane_id, async () => {
       if (request.signal.aborted) return promptChanged();
       const deadlineMs = options.answerDeadlineMs ?? 4_000;
@@ -1444,6 +1502,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       // a plan card's id carries its plan file's revision: the file as it is now must match too
       if (inputUnverified || !prompt || (await withPlanFile(prompt, options.claudeTranscript?.(body.pane_id)))!.id !== body.prompt_id) return promptChanged();
       log.matched = true;
+      waitedOn = waitingKindOf(prompt) !== undefined;
 
       const parsedPrompt = parsedByPublicPrompt.get(prompt);
       // before each key: the look the key needs (beforeKey), then, for an omp card read under an open ask call, that
@@ -2167,9 +2226,11 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     // queued for it meanwhile is not held up behind the polls
     if (form.still !== undefined) await formMovedOn(body.pane_id, form.still, options.codexHome, options.openCodeStateDir);
     if (response.ok && delivered) options.onAnswered?.();
+    for (const told of answering.splice(0)) told(waitedOn && response.ok && delivered);
     await logAnswer(log, response);
     return response;
   } catch (error) {
+    for (const told of answering.splice(0)) told(waitedOn && delivered);
     const response = errorResponse(error);
     if (answerLog !== null) await logAnswer(answerLog, response);
     return response;

@@ -271,6 +271,11 @@ run_script scripts/relay-second-device-join-regression.ts
 run_script scripts/machine-own-ovis-regression.ts
 run_script scripts/herdr-profiles-browser-qa.ts
 run_script scripts/relay-e2e-regression.ts
+run_script scripts/offline-typing-relay-regression.ts
 run_script scripts/relay-shell-browser-qa.ts
 run_script scripts/relay-dashboard-browser-qa.ts
+run_script scripts/sheet-history-late-step-regression.ts
+run_script scripts/my-machines-today-regression.ts
+run_script scripts/my-machines-screens-qa.ts
+run_script scripts/relay-offline-reasons-regression.ts
 run_script scripts/relay-media-browser-qa.ts
