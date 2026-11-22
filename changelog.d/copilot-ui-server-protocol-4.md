@@ -1,3 +1,4 @@
-### Changed
-- Chat now reads the foreground session from Copilot's `--ui-server` using protocol 4 only.
-  Panes running protocol 3 use Terminal instead; start Copilot with a protocol 4 CLI to use Chat.
+### Fixed
+- Chat reads the foreground session from Copilot's `--ui-server` again with Copilot CLI 1.0.113
+  and later, which speak protocol 4. Panes on an older CLI (protocol 3) keep their Chat; any other
+  version uses Terminal.

@@ -120,6 +120,12 @@ linux("requeries the current foreground across warm switches without a native re
   } finally { await test.close(); }
 });
 
+linux("reads a Copilot that still speaks protocol 3 as before", async () => {
+  const test = await fixture("legacy");
+  try { expect(await observeCopilotForeground(test.pid)).toEqual({ state: "observed", sessionId: first, authorization: "unproven" }); }
+  finally { await test.close(); }
+});
+
 linux("never retains the last ID after a failed observation or protected-endpoint refusal", async () => {
   const test = await fixture();
   try {
@@ -175,11 +181,11 @@ const attempts = 3;
 const attemptBudget = 3 * COPILOT_RPC_TIMEOUT_MS;
 const fixtureStart = 5_000;
 for (const mode of ["switch", "event", "event-after-final", "malformed", "wrong-id", "empty", "oversize", "truncated", "close",
-  "legacy", "unknown", "string-version", "negative-handshake", "stall"]) {
+  "unknown", "string-version", "negative-handshake", "stall"]) {
   linux(`rejects ${mode} instead of returning a stale foreground ID`, async () => {
     const test = await fixture(mode);
     const diagnostic = mode === "switch" || mode === "event" || mode === "event-after-final" ? "foreground_changed"
-      : mode === "empty" ? "no_foreground" : ["legacy", "unknown", "string-version"].includes(mode) ? "unsupported_protocol"
+      : mode === "empty" ? "no_foreground" : ["unknown", "string-version"].includes(mode) ? "unsupported_protocol"
       : mode === "stall" ? "rpc_timeout" : mode === "close" || mode === "truncated" ? "rpc_failed" : "malformed_rpc";
     try {
       let result = await observeCopilotForeground(test.pid);
