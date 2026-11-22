@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { accountDeviceId, exportAccountKey, newRecordId, signAccountRecord, signSafetyRecord, type BlockRecord, type SafetyRecord } from "../../shared/account-records.ts";
@@ -10,12 +10,13 @@ import { privateStateFs } from "../private-state.ts";
 import { loadRelayIdentity } from "../relay/identity.ts";
 import { bounded, deferred, relayConnection, relayDevice, relayFixture } from "../relay/test-helpers.ts";
 import { DeviceJournal } from "./device-journal.ts";
+import { memberSnapshotPc } from "./listed-pc.test-helpers.ts";
 import { AccountHolds } from "./holds.ts";
 import { AccountMailbox } from "./mailbox.ts";
 import { PcAccountState } from "./pc-binding.ts";
 import { applyAccountRecords } from "./records.ts";
 import { RemovalEvidence } from "./removal-evidence.ts";
-import { pcRecordId, SAFETY_LOG_FILE, SafetyLog, WAITING_MAX } from "./safety-log.ts";
+import { pcRecordId, SAFETY_LOG_FILE, SAFETY_OVERFLOW_FILE, SafetyLog, WAITING_MAX } from "./safety-log.ts";
 
 const ACCOUNT = "acct_1";
 const SERVER = "0123456789abcdef0123456789abcdef";
@@ -42,11 +43,17 @@ function pc() {
   return { dir, ...open(dir) };
 }
 
-async function member(devices: DeviceStore): Promise<Key & { id: string }> {
+async function paired(devices: DeviceStore): Promise<Key & { id: string }> {
   const k = await key();
-  const id = devices.pairRelay(devices.startPairing().code, "Phone", k.spki)!.device.id;
-  devices.linkAccountKey(id, k.spki, k.spki, ACCOUNT);
-  return { ...k, id };
+  const pairing = devices.pairRelay(devices.startPairing().code, "Phone", k.spki);
+  if (pairing === null) throw new Error("Fixture pairing was refused");
+  return { ...k, id: pairing.device.id };
+}
+
+async function member(devices: DeviceStore): Promise<Key & { id: string }> {
+  const k = await paired(devices);
+  devices.linkAccountKey(k.id, k.spki, k.spki, ACCOUNT);
+  return k;
 }
 
 const block = (target: string, by: Key): Promise<BlockRecord> =>
@@ -79,9 +86,9 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
 
   test("P19, T36: a waiting removal survives an unrelated Revoke and applies when its signer joins", async () => {
     const { dir, devices } = pc();
+    const signer = await paired(devices);
     const target = await member(devices);
     const unrelated = await member(devices);
-    const signer = await key();
     const identity = loadRelayIdentity(dir);
     const mailbox = new AccountMailbox({ devices, identity: () => identity, service: "https://account.test", pendingPath: join(dir, "account-pending.json") });
     const removal = await remove(target.spki, signer);
@@ -89,11 +96,33 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
       .toEqual([{ id: removal.id, outcome: "refused", code: "signer_not_member" }]);
     expect(devices.revoke(unrelated.id)).toBe(true);
 
-    const add = await signAccountRecord({ v: 1, kind: "add", account: ACCOUNT, key: signer.spki, label: "Signer", role: "drive", issued_at: new Date().toISOString(), id: newRecordId(), signer: target.spki }, target.keys.privateKey);
-    expect(await applyAccountRecords(devices, [add], identity.server_id, Date.now(), mailbox.gates()))
-      .toEqual([{ id: add.id, outcome: "applied" }]);
-    await mailbox.settle();
+    expect(devices.linkAccountKey(signer.id, signer.spki, signer.spki, ACCOUNT)).not.toBeNull();
+    expect(await mailbox.settle()).toBe(1);
     expect(devices.has(target.id)).toBe(false);
+  });
+
+  test("P21, T36: a waiting removal whose signer joins after its target is refused, not kept", async () => {
+    const { dir, devices } = pc();
+    const target = await member(devices);
+    const signer = await key();
+    const identity = loadRelayIdentity(dir);
+    const pendingPath = join(dir, "account-pending.json");
+    const mailbox = new AccountMailbox({ devices, identity: () => identity, service: "https://account.test", pendingPath });
+    const removal = await remove(target.spki, signer);
+    expect(await applyAccountRecords(devices, [removal], identity.server_id, Date.now(), mailbox.gates(), (record) => mailbox.wait(record)))
+      .toEqual([{ id: removal.id, outcome: "refused", code: "signer_not_member" }]);
+
+    const pairing = devices.pairRelay(devices.startPairing().code, "Signer", signer.spki);
+    if (pairing === null) throw new Error("Fixture pairing was refused");
+    expect(devices.linkAccountKey(pairing.device.id, signer.spki, signer.spki, ACCOUNT)).not.toBeNull();
+    expect(mailbox.waitingRemoveKeys()).toEqual([target.spki]);
+    expect(await applyAccountRecords(devices, [removal], identity.server_id, Date.now(), mailbox.gates()))
+      .toEqual([{ id: removal.id, outcome: "refused", code: "older_device" }]);
+
+    expect(await mailbox.settle()).toBe(0);
+    expect(devices.has(target.id)).toBe(true);
+    expect(mailbox.waitingRemoveKeys()).toEqual([]);
+    expect(JSON.parse(readFileSync(pendingPath, "utf8"))).toEqual([]);
   });
 
   test("P19, T36: revoking the signer discards its pending removal (T18)", async () => {
@@ -112,14 +141,15 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
 
   test("P19, T36: removing the signer during retry discards its draining removal only", async () => {
     const { dir, devices } = pc();
-    const target = await member(devices);
+    const revoker = await member(devices);
     const signer = await member(devices);
+    const target = await member(devices);
     const absent = await key();
     const identity = loadRelayIdentity(dir);
     const pendingPath = join(dir, "account-pending.json");
     const mailbox = new AccountMailbox({ devices, identity: () => identity, service: "https://account.test", pendingPath });
     const unrelated = await remove(target.spki, absent);
-    expect(mailbox.wait(await remove(signer.spki, target))).toBe(true);
+    expect(mailbox.wait(await remove(signer.spki, revoker))).toBe(true);
     expect(mailbox.wait(await remove(target.spki, signer))).toBe(true);
     expect(mailbox.wait(unrelated)).toBe(true);
 
@@ -220,15 +250,16 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
       expect(log.wait({ record: queued, got: "mailbox", signer_removed: false })).toBe(true);
     }
     const screen = new TransformStream<Uint8Array>();
-    const fixture = relayFixture(false, {
-      stateDir, accountOpensAll: true,
+    const { fixture, firstRead } = memberSnapshotPc({
+      stateDir,
       ...(path === "relay pairing" ? { platform: "linux", desktopOwner: { input: screen.readable, write() {} } } : {}),
     });
     fixtures.push(fixture);
-    const { devices, localConfirms, safetyLog } = fixture.app.context.services;
+    const { devices, safetyLog } = fixture.app.context.services;
     if (path !== "startup") {
       const signer = await relayDevice(fixture);
       devices.linkAccountKey(signer.id, signer.publicKey, signer.publicKey, ACCOUNT);
+      await firstRead();
       queued = await block(target.spki, { keys: signer.keys, spki: signer.publicKey });
       expect(await devices.applyBlock(queued, "mailbox")).toMatchObject({ outcome: "refused", reason: "unknown_target" });
       if (path === "account add") {
@@ -255,7 +286,7 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
       link.mux.sendSession({ type: FrameType.KEY_PROVE, flags: 0, stream_id: 0, payload: { signature } });
       await bounded(pending.promise);
       // The waiting block needs the target's row; approve the proved key so enrollment reaches it.
-      const prompt = localConfirms?.pending().find(({ action }) => action.kind === "approve_key");
+      const prompt = fixture.app.context.services.localConfirms?.pending().find(({ action }) => action.kind === "approve_key");
       if (!prompt) throw new Error("The proved key did not reach the PC screen");
       const writer = screen.writable.getWriter();
       await writer.write(new TextEncoder().encode(`${JSON.stringify({ approve: prompt.id })}\n`));
@@ -429,5 +460,66 @@ describe("a block holds only while its signer is a member here (P16, P19, T73)",
     expect(devices.has(ids[0]!)).toBe(false);
     // a write that throws publishes nothing
     expect(() => devices.admitListedRows(() => { throw new Error("list write failed"); })).toThrow("list write failed");
+  });
+
+  /** A PC with WAITING_MAX blocks waiting on a target it has no row of. */
+  async function fullQueue() {
+    const made = pc();
+    const signer = await member(made.devices);
+    const absent = await key();
+    for (let i = 0; i < WAITING_MAX; i += 1) made.log.wait({ record: await block(absent.spki, signer), got: "mailbox", signer_removed: false });
+    return { ...made, signer };
+  }
+  const failing = (names: readonly string[]) => {
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => { if (names.some((name) => String(to).endsWith(name))) throw new Error("simulated EIO"); return rename(from, to); };
+    return () => { privateStateFs.renameSync = rename; };
+  };
+
+  test("S10-2: a queue of exactly WAITING_MAX drops nothing and opens after a restart; one judged leaves it open", async () => {
+    const { dir, devices, log } = await fullQueue();
+    expect(devices.failsClosed).toBe(false);
+    log.unwait(log.waitingBlocks()[0]!.record.id);
+    expect({ waiting: log.waitingBlocks().length, closed: devices.failsClosed }).toEqual({ waiting: WAITING_MAX - 1, closed: false });
+    log.close();
+    const reopened = open(dir);
+    try { expect(reopened.devices.failsClosed).toBe(false); } finally { reopened.log.close(); }
+  });
+
+  test("S10-2: when neither the log nor the side file takes the mark, the block is kept, nothing is dropped, and the PC is closed for this run", async () => {
+    const { devices, log, signer } = await fullQueue();
+    const extra = await block((await key()).spki, signer);
+    const restore = failing(["account-log.json", SAFETY_OVERFLOW_FILE]);
+    try { await devices.applyBlock(extra, "session"); } finally { restore(); }
+    expect(devices.failsClosed).toBe(true);
+    expect(log.waitingBlocks().map((kept) => kept.record.id)).toContain(extra.id);
+    expect(log.waitingBlocks()).toHaveLength(WAITING_MAX + 1);
+  });
+
+  test("S10-2: a marker that is a dangling link, or a log missing beside a marker, fails closed", async () => {
+    for (const shape of ["dangling", "missing log"] as const) {
+      const { dir, log } = pc();
+      log.close();
+      if (shape === "dangling") symlinkSync(join(dir, "nowhere"), join(dir, SAFETY_OVERFLOW_FILE));
+      else { writeFileSync(join(dir, SAFETY_OVERFLOW_FILE), "{}", { mode: 0o600 }); rmSync(join(dir, SAFETY_LOG_FILE), { force: true }); }
+      const reopened = open(dir);
+      try { expect({ shape, strict: reopened.devices.failsClosed }).toEqual({ shape, strict: true }); } finally { reopened.log.close(); }
+    }
+  });
+
+  test("S10-2, P19, S19: a full queue whose overflow mark cannot be written in the log still fails closed after a restart", async () => {
+    const { dir, devices, log } = pc();
+    const signer = await member(devices);
+    const absent = await key();
+    for (let i = 0; i < WAITING_MAX; i += 1) log.wait({ record: await block(absent.spki, signer), got: "mailbox", signer_removed: false });
+    const overflow = await block((await key()).spki, signer);
+    const rename = privateStateFs.renameSync;
+    privateStateFs.renameSync = (from, to) => { if (String(to).endsWith("account-log.json")) throw new Error("simulated EIO"); return rename(from, to); };
+    try { await devices.applyBlock(overflow, "mailbox"); } finally { privateStateFs.renameSync = rename; }
+    expect(devices.failsClosed).toBe(true);
+    expect(existsSync(join(dir, SAFETY_OVERFLOW_FILE))).toBe(true);
+    log.close();
+    const reopened = open(dir);
+    try { expect(reopened.devices.failsClosed).toBe(true); } finally { reopened.log.close(); }
   });
 });

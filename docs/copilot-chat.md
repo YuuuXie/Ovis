@@ -41,6 +41,11 @@ about that foreground session. If the read fails or the foreground changes durin
 status stands. Activity alone never marks a turn finished or releases a queued message.
 Ovis never adds `--ui-server` to a launch.
 
+This API reader accepts UI-server protocol 3 (Copilot CLI 1.0.105 to 1.0.112) and protocol 4
+(1.0.113 and later, checked with the 1.0.113 and 1.0.114 releases): the
+`connect`, `session.getForeground` and `session.lifecycle` messages it reads are the same in
+both. Panes started with `--ui-server` on any other version use Terminal instead.
+
 That API has no authentication. With Copilot CLI 1.0.105, any program that can reach its
 loopback port can control the session, including creating new sessions, and setting
 `COPILOT_CONNECTION_TOKEN` did not change this. Other users on the same PC may be able to reach
