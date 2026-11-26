@@ -410,9 +410,9 @@ export class HerdrSocket {
       for (const [paneId, state] of this.attached) {
         state.releaseSizeOwed = !state.keepSize;
         delete state.fitOffered;
-        this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", ...(state.windowsFit ? { windows_fit: true } : {}), receipt_resume_id: receiptResumeId(), ...(state.keepSize || state.pendingKeptFit ? { keep_size: true } : {}) });
-        if (state.pendingKeptFit && !state.keepSize && this.mode === "interact")
-          this.rawSend({ type: "resize", pane_id: paneId, cols: state.cols, rows: state.rows });
+        // Only the old connection could have ignored that resize. This attach already carries the current size intent.
+        delete state.pendingKeptFit;
+        this.rawSend({ type: "attach", pane_id: paneId, cols: state.cols, rows: state.rows, flow_control: "ack", ...(state.windowsFit ? { windows_fit: true } : {}), receipt_resume_id: receiptResumeId(), ...(state.keepSize ? { keep_size: true } : {}) });
       }
     });
 

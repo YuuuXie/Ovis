@@ -915,6 +915,26 @@ it("offers the current local grid immediately before explicit Windows fit takeov
   } finally { client.close(); }
 });
 
+it("reattaches a newly shown pane at its own size before the server offers Windows fit", () => {
+  const client = new HerdrSocket("ws://test/ws");
+  client.connect();
+  const socket = FakeSocket.last;
+  socket.open();
+  try {
+    const pane = "w1:p1";
+    client.attach(pane, 120, 40, true, true);
+    client.resize(pane, 44, 15);
+    const before = socket.sent.length;
+    socket.open();
+    expect(socket.sent.slice(before).filter(frame => frame.type === "attach" || frame.type === "resize")).toEqual([
+      { type: "attach", pane_id: pane, cols: 44, rows: 15, flow_control: "ack", receipt_resume_id: expect.any(String), windows_fit: true },
+    ]);
+    const beforeOffer = socket.sent.length;
+    socket.receive({ type: "pane-geometry", pane_id: pane, cols: 120, rows: 40, fixed: true, windows_fit: true });
+    expect(socket.sent).toHaveLength(beforeOffer);
+  } finally { client.close(); }
+});
+
 it("requests a fresh native fit after release, never by an observer or a replayed takeover", () => {
   const client = new HerdrSocket("ws://test/ws");
   client.connect();
@@ -924,9 +944,6 @@ it("requests a fresh native fit after release, never by an observer or a replaye
     const pane = "w1:p1";
     client.attach(pane, 40, 15, true, true);
     client.resize(pane, 51, 18);
-    expect(socket.sent.at(-1)).toMatchObject({ type: "resize", cols: 51, rows: 18 });
-    socket.open();
-    expect(socket.sent.at(-2)).toMatchObject({ type: "attach", keep_size: true, windows_fit: true });
     expect(socket.sent.at(-1)).toMatchObject({ type: "resize", cols: 51, rows: 18 });
     const fixed = { type: "pane-geometry", pane_id: pane, cols: 120, rows: 40, fixed: true, windows_fit: true };
     const beforeOffer = socket.sent.length;
