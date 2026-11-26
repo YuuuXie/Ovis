@@ -105,7 +105,7 @@ with the same private environment and no inherited socket overrides, start the d
 In the QA shell set `HERDR_SOCKET` to `herdr/sessions/<name>/herdr.sock` under that config home
 and `CHROME_PATH` to installed Chromium. Build the client, then run `bun scripts/windows-pane-fit-qa.ts`.
 The helper creates and closes its own workspace, checks PowerShell's console dimensions after
-claims and browser resizes, and checks that **Open here** fits xterm before its first owned frame
+claims and browser resizes, and checks that **Open here** fits Ghostty before its first owned frame
 and delivers typed input. Set `UI_EVIDENCE_DIR` to retain before/after screenshots. Stop only that
 test daemon with `& $env:OVIS_HERDR_BIN session stop $env:HERDR_TEST_SESSION` and remove its
 private state afterwards.

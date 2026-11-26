@@ -53,7 +53,7 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
       class Recording extends WebSocket {
         constructor(url: string | URL, protocols?: string | string[]) {
           super(url, protocols);
-          // Installed before the app listener: sample the real xterm DOM before its first owned bytes.
+          // Installed before the app listener: sample the Ghostty grid before its first owned bytes.
           this.addEventListener("message", event => {
             const m = JSON.parse(String(event.data)) as ServerMessage;
             if (!("pane_id" in m) || m.pane_id !== target) return;
@@ -62,9 +62,10 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
               if (m.fixed) state.fixed = grid;
               if (m.fixed === false) state.granted = grid;
             } else if (m.type === "pty-data" && state.granted && !state.beforeData && state.cellWidth) {
-              const screen = document.querySelector<HTMLElement>(".pane-terminal .xterm-screen")!;
-              state.beforeData = { cols: Math.round(parseFloat(screen.style.width) / state.cellWidth),
-                rows: screen.querySelector(".xterm-rows")!.childElementCount };
+              const layer = document.querySelector<HTMLElement>(".pane-terminal .ghostty-layer");
+              const text = layer?.querySelector(".ghostty-text");
+              if (!layer || !text) throw new Error("Ghostty grid missing before the first owned frame");
+              state.beforeData = { cols: Math.round(parseFloat(layer.style.width) / state.cellWidth), rows: text.childElementCount };
             }
           });
         }
@@ -77,9 +78,9 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
     await page.waitForFunction(({ cols, rows }) => {
       const { fitQa } = window as unknown as Probe;
       const fixed = fitQa.fixed;
-      const screen = document.querySelector<HTMLElement>(".pane-terminal .xterm-screen");
-      if (fixed?.cols !== cols || fixed.rows !== rows || screen?.querySelector(".xterm-rows")?.childElementCount !== rows) return false;
-      const width = parseFloat(screen.style.width);
+      const layer = document.querySelector<HTMLElement>(".pane-terminal .ghostty-layer");
+      if (fixed?.cols !== cols || fixed.rows !== rows || !layer || layer.querySelector(".ghostty-text")?.childElementCount !== rows) return false;
+      const width = parseFloat(layer.style.width);
       if (!(width > 0)) return false;
       fitQa.cellWidth = width / cols;
       return true;
@@ -93,7 +94,7 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
     const { granted, beforeData } = await receipt();
     assert(granted && beforeData);
     assert.ok(granted.cols < previous.cols && granted.rows < previous.rows, "takeover exercised differently sized viewers");
-    assert.deepEqual(beforeData, granted, "xterm must already match the grant before receiving the controller's first frame");
+    assert.deepEqual(beforeData, granted, "Ghostty must already match the grant before receiving the controller's first frame");
     await shot(page, "after-open-here.png");
     assert.equal(await consoleSize(), `${granted.cols}x${granted.rows}`);
     const typed = join(state, crypto.randomUUID());
@@ -101,7 +102,7 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
     await page.keyboard.type(`[IO.File]::WriteAllText('${typed.replaceAll("'", "''")}','typed-by-new-controller')`);
     await page.keyboard.press("Enter");
     await until(() => { try { return readFileSync(typed, "utf8") === "typed-by-new-controller" || undefined; } catch { return undefined; } }, "typed browser input reaches PowerShell");
-    console.log(`PASS Open here: fixed ${previous.cols}x${previous.rows} -> xterm ${beforeData.cols}x${beforeData.rows} before the first owned frame; native console ${granted.cols}x${granted.rows}, browser-typed PowerShell input received`);
+    console.log(`PASS Open here: fixed ${previous.cols}x${previous.rows} -> Ghostty ${beforeData.cols}x${beforeData.rows} before the first owned frame; native console ${granted.cols}x${granted.rows}, browser-typed PowerShell input received`);
   } finally { await browser.close(); }
 }
 async function connect(mode: "observe" | "interact") {
