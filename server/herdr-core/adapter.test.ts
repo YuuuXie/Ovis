@@ -219,6 +219,14 @@ describe("herdr-core adapter", () => {
     ]);
   });
 
+  it("refuses legacy prompts before writing to a terminal owned by an ACP keeper", async () => {
+    const { socket, cores } = await setup([terminal("t1", {
+      labels: { "ovis.acp": "child" }, status: { app: "codex", state: "idle" },
+    })], { "terminal.send": () => ({ turn: 1 }) });
+    await expect(agentPrompt("t1", "do not silently drop this", socket)).rejects.toMatchObject({ code: "acp_prompt_required" });
+    expect(cores.flatMap(core => core.calls).some(call => call.method === "terminal.send")).toBeFalse();
+  });
+
   it("tells agy's plan review at rest in its status events as in the snapshot, done on the turn that counts it with nothing new to draw, and its question blocked", async () => {
     let channel = 0;
     const working = { app: "antigravity", state: "working" };
@@ -292,12 +300,54 @@ describe("herdr-core adapter", () => {
     expect(claudeInputDraft(live, colors)).toBe(false);
   });
 
+  it("reads the colors of a Claude Code a shell started on the alternate screen from that screen alone, never the shell's lines", async () => {
+    const rule = "\u2500".repeat(20);
+    // as hc 0.1.21 paints it: its reset, the main screen (the shell's modes, tab stops, the line that
+    // typed `claude`, its cursor and title), the switch to the alternate screen, its own modes and tab
+    // stops, then that screen: a blank row over Claude's box, its suggestion dim under its own inverse
+    // cursor, the cursor row blank
+    const paint = "\u0018\u001b[!p\u001b[?2026l\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J\u001b[?2004h\u001b[3g\u001b[9G\u001bH\u001b[H"
+      + "\u001b[0m~/code \u276f claude\u001b[2;1H\u001b]2;claude\u001b\\\u001b[?1049h\u001b[!p\u001b[?1006h\u001b[?2004h\u001b[3g\u001b[9G\u001bH\u001b[H"
+      + `\u001b[0m\r\n\u001b[38;2;136;136;136m${rule}\u001b[0m\r\n\u276f\u00a0\u001b[0m\u001b[7md\u001b[0m\u001b[2mo it\u001b[0m\r\n${rule}  \r\n`
+      + "\u001b[5;1H\u001b[0m\u001b]2;claude\u001b\\\u001b[?9001l\u001b]7501;state=idle:app=claude-code\u001b\\";
+    // hc's text read of the alternate screen: the blank row at the bottom dropped, nothing taken in at the top
+    const text = `\n${rule}\n\u276f\u00a0do it\n${rule}`;
+    const { socket, cores } = await setup([terminal("t1", { rows: 5 })], {
+      "terminal.read": () => ({ text, complete: true, how: "screen" }),
+      "terminal.attach": () => {
+        const core = cores.at(-1)!;
+        const channel = core.channel();
+        core.replyTail = encodeFrame(channel, FRAME_DATA, paint);
+        return { channel, terminal: terminal("t1", { rows: 5 }) };
+      },
+    });
+    const live = (await paneRead({ paneId: "t1", source: "detection", format: "text" }, socket)).text;
+    const colors = (await paneRead({ paneId: "t1", source: "visible", format: "ansi" }, socket)).text;
+    expect(colors).toBe(`\u001b[0m\n\u001b[38;2;136;136;136m${rule}\u001b[0m\n\u276f\u00a0\u001b[0m\u001b[7md\u001b[0m\u001b[2mo it\u001b[0m\n${rule}`);
+    expect(viewportShowsLive(null, null, colors, live, live)).toBe(true);
+    expect(claudeInputDraft(live, colors)).toBe(false);
+  });
+
+  it("leaves out the main screen's history as well, which hc 0.1.21 paints before a full-screen program's screen when the attach asks for history", () => {
+    // measured on hc 0.1.21, as a 3-row terminal: its reset, the shell's history pushed up, a second clear,
+    // the shell's screen (the line that started the program), its title, the switch, then the alternate screen
+    const paint = "\u0018\u001b[!p\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J\u001b[0mline1\r\nline2\u001b[0m\r\n\n\n\n\u001b[H\u001b[2J"
+      + "\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[0mline3\r\n$ claude\u001b[3;1H\u001b[0m\u001b]2;shell\u001b\\\u001b[?1049h\u001b[!p\u001b[3g\u001b[9G\u001bH\u001b[H"
+      + "\r\n\u001b[0m\u276f\u00a0\u001b[2mdo it\u001b[0m\u001b[3;1H\u001b[0m\u001b]2;claude\u001b\\\u001b[?9001l";
+    expect(paintedScreen(paint, 3)).toBe("\n\u001b[0m\u276f\u00a0\u001b[2mdo it\u001b[0m\u001b[0m");
+  });
+
   it("reads no history of a terminal on the alternate screen, which hc would scroll and repaint for every viewer (#3128)", async () => {
     const preamble = "\u0018\u001b[!p\u001b[?2026l\u001b[?1004l\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J";
-    for (const shown of ["alternate", "main", "refused"] as const) {
+    // a program a shell started: hc 0.1.21 paints the shell's modes, tab stops and lines first, then switches
+    const shell = "\u001b[?2004h\u001b[3g\u001b[9G\u001bH\u001b[H\u001b[0m$ codex\u001b[2;1H";
+    // the terminal's own program: hc 0.1.21 paints the main screen it never wrote to first, then switches
+    const own = "\u001b[3g\u001b[H\u001b[1;1H\u001b[0m";
+    const before = { alternate: "\u001b[?1049h", "after a shell": `${shell}\u001b[?1049h\u001b[!p`, "on its own": `${own}\u001b[?1049h\u001b[!p`, main: "", refused: "" };
+    for (const shown of ["alternate", "after a shell", "on its own", "main", "refused"] as const) {
       const full = shown !== "main";
       // as hc 0.1.14 paints with no history: its reset, the alternate screen if the program is on it, the screen
-      const paint = `${preamble}${shown === "alternate" ? "\u001b[?1049h" : ""}\u001b[H\u001b[0m\u203a Ask Codex\r\n\u001b[?9001l`;
+      const paint = `${preamble}${before[shown]}\u001b[H\u001b[0m\u203a Ask Codex\r\n\u001b[?9001l`;
       const { socket, cores } = await setup([terminal("t1", { rows: 4 })], {
         "terminal.read": (params) => ({ text: params["lines"] ? "older\n\u203a Ask Codex" : "\u203a Ask Codex", complete: true, how: params["lines"] ? "history" : "screen" }),
         "terminal.attach": () => {
@@ -316,6 +366,28 @@ describe("herdr-core adapter", () => {
       expect(read.text).toBe(full ? "\u203a Ask Codex" : "older\n\u203a Ask Codex");
       expect(read.truncated).toBe(full);
     }
+  });
+
+  it("reads only the paint hc sends again once another machine's line is back, never the one the drop cut short", async () => {
+    const reset = "\u0018\u001b[!p\u001b[?2026l\u001b[?1049l\u001b[?1047l\u001b[?47l\u001b[H\u001b[2J";
+    // the line drops in the middle of a full-screen program's paint; hc says so, then attaches again on the same
+    // channel and paints afresh (remote/viewers.rs `reattach`), the program back on the main screen meanwhile
+    const cut = `${reset}\u001b[3g\u001b[H\u001b[0m$ vim\u001b[2;1H\u001b[?1049h\u001b[!p\u001b[H\u001b[0mSTALE\r\n`;
+    const lost = "\u0018\r\n[line to lab lost; reconnecting...]\r\n";
+    const again = `${reset}\u001b[H\u001b[0m$ vim\r\n$ \u001b[32mback\u001b[0m\u001b[2;8H\u001b[?9001l`;
+    const { socket, cores } = await setup([terminal("t1", { rows: 4 })], {
+      "terminal.read": (params) => ({ text: params["lines"] ? "older\n$ vim\n$ back" : "$ vim\n$ back", complete: true, how: params["lines"] ? "history" : "screen" }),
+      "terminal.attach": () => {
+        const core = cores.at(-1)!;
+        const channel = core.channel();
+        core.replyTail = Buffer.concat([encodeFrame(channel, FRAME_DATA, cut), encodeFrame(channel, FRAME_DATA, lost + again)]);
+        return { channel, terminal: terminal("t1", { rows: 4 }) };
+      },
+    });
+    expect((await paneRead({ paneId: "t1", source: "visible", format: "ansi" }, socket)).text).toBe("\u001b[0m$ vim\n$ \u001b[32mback\u001b[0m");
+    const read = await paneRead({ paneId: "t1", source: "recent", lines: 400, stripAnsi: true }, socket);
+    expect(cores[0]!.calls.filter((call) => call.method === "terminal.read").map((call) => call.params["lines"])).toEqual([400]);
+    expect(read.text).toBe("older\n$ vim\n$ back");
   });
 
   it("answers a colored read with hc's plain text when the watch-only attach brings no screen", async () => {
@@ -780,6 +852,60 @@ it("asks for a fresh snapshot when a report's kind, message or progress changes,
     expect(written).toHaveLength(1);
   });
 
+  it("drains accepted OpenCode label writes on orderly shutdown, accepting no more writes", async () => {
+    const written: string[] = [];
+    const started = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<void>();
+    const call = async (_method: string, { labels }: { labels: Record<string, string> }) => {
+      written.push(labels["ovis.opencode"] ?? "");
+      if (written.length === 1) {
+        started.resolve();
+        await first.promise;
+      }
+    };
+    const labels = sessionLabeler({ call: call as HcConnection["call"] });
+    labels.label("t1", "", ["ses_first"]);
+    await started.promise;
+    labels.label("t1", "", ["ses_first", "ses_second"]);
+    const stopping = labels.stop({ drain: true });
+    labels.label("t2", "", ["ses_third"]);
+    first.resolve();
+    await stopping;
+    expect(written).toEqual(["ses_first", "ses_first ses_second"]);
+  });
+
+  it("stops draining after its deadline without sending the next queued OpenCode label", async () => {
+    const written: string[] = [];
+    const started = Promise.withResolvers<void>();
+    const first = Promise.withResolvers<void>();
+    const call = async (_method: string, { labels }: { labels: Record<string, string> }) => {
+      written.push(labels["ovis.opencode"] ?? "");
+      started.resolve();
+      await first.promise;
+    };
+    const labels = sessionLabeler({ call: call as HcConnection["call"] });
+    jest.useFakeTimers();
+    try {
+      labels.label("t1", "", ["ses_first"]);
+      await started.promise;
+      labels.label("t1", "", ["ses_first", "ses_second"]);
+      let stopped = false;
+      void Promise.resolve(labels.stop({ drain: true })).then(() => { stopped = true; });
+      jest.advanceTimersByTime(499);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stopped).toBe(false);
+      jest.advanceTimersByTime(1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stopped).toBe(true);
+      first.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(written).toEqual(["ses_first"]);
+    } finally {
+      first.resolve();
+      jest.useRealTimers();
+    }
+  });
+
   it("remembers an OpenCode session a status event named, for a turn that ended before any snapshot", async () => {
     let channel = 0;
     const t1 = terminal("t1", { title: "OC | short", status: { app: "opencode", state: "idle" } });
@@ -997,6 +1123,27 @@ describe("herdr-core adapter, new and closed terminals", () => {
     });
     return ready;
   }
+
+  it("refuses to delete B when the question named A at the same workspace address", async () => {
+    const { dir, repo, git } = repository();
+    const a = join(dir, "a"), b = join(dir, "b");
+    expect(git("-C", repo, "worktree", "add", "-q", "-b", "a", a).exitCode).toBe(0);
+    expect(git("-C", repo, "worktree", "add", "-q", "-b", "b", b).exitCode).toBe(0);
+    const { socket } = await labeling([terminal("t1", { cwd: b, labels: { "herdr.space": "S", "herdr.tab": "T" } })]);
+    await expect(herdrRpc("worktree.remove", { workspace_id: "S", expected_core: "c1", expected_checkout: a }, socket))
+      .rejects.toMatchObject({ code: "worktree_target_changed" });
+    expect([existsSync(a), existsSync(b)]).toEqual([true, true]);
+  });
+
+  it("does not create a branch on another core with the same workspace address", async () => {
+    const { dir, repo, git } = repository();
+    const checkout = join(dir, "misdirected");
+    const { socket } = await labeling([terminal("t1", { cwd: repo, labels: { "herdr.space": "S", "herdr.tab": "T" } })]);
+    await expect(herdrRpc("worktree.create", { workspace_id: "S", branch: "misdirected", path: checkout, expected_core: "other-core" }, socket))
+      .rejects.toMatchObject({ code: "worktree_other_core", message: "The Ovis server serves another core" });
+    expect(existsSync(checkout)).toBeFalse();
+    expect(git("-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/misdirected").exitCode).toBe(1);
+  });
 
   it("makes, lists, opens and removes a worktree with git on a core Ovis lays out, grouped under the repository's workspace", async () => {
     const { dir, repo } = repository();
@@ -1478,6 +1625,17 @@ describe("herdr-core adapter, agents", () => {
     expect(core.typed.map((write) => write.text).join("")).toBe("\u0015'claude' '--model' 'it'\\''s big'\r");
     const methods = core.calls.map((call) => call.method);
     expect(methods.lastIndexOf("terminal.get")).toBeGreaterThan(methods.indexOf("terminal.attach"));
+  });
+
+  it("types a launcher Ovis wrote in place of the agent's command, and answers once the agent it starts is in front", async () => {
+    const shell = { pid: 10, name: "bash" };
+    const record = terminal("t1", { cols: 90, rows: 20, pid: 10, argv: ["/bin/bash"], foreground: shell });
+    const { socket, cores } = await posix([record], {
+      "terminal.get": () => ({ ...record, foreground: cores[0]!.typed.length > 0 ? { pid: 12, name: "codex" } : shell }),
+    });
+    await agentStart({ name: "codex-1", kind: "codex", paneId: "t1", args: ["--model", "m"], program: "/tmp/ovis-codex-x/launch" }, socket);
+    expect(cores[0]!.typed.map((write) => write.text).join("")).toBe("\u0015'/tmp/ovis-codex-x/launch'\r");
+    await expect(agentStart({ name: "codex-1", kind: "codex", paneId: "t1", program: "launch" }, socket)).rejects.toMatchObject({ code: "invalid_params" });
   });
 
   it("counts an agent run through its interpreter as started, and a shell's command-not-found handler as a failed start", async () => {
