@@ -740,9 +740,10 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       const claim = client.data.attached.get(message.pane_id);
       const fitAttachment = attachments.get(message.pane_id);
       if (fitAttachment?.kind === "mirror" && fitAttachment.fit) {
-        if (claim?.fitGrid?.drives && !claim.keepSize && fitAttachment.fit.lease?.owner === client) {
+        if (claim?.fitGrid?.drives && !claim.keepSize && fitAttachment.clients.has(client)) {
+          // A held viewer may update its requested grid, not the live console.
           Object.assign(claim.fitGrid, geometry);
-          fitPane(message.pane_id, fitAttachment, client);
+          if (fitAttachment.fit.lease?.owner === client) fitPane(message.pane_id, fitAttachment, client);
         }
         return;
       }
@@ -754,9 +755,9 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
         if (connectionOf(client).closing || connectionOf(client).mode !== "interact" || client.data.attached.get(message.pane_id) !== claim || claim?.keepSize) return;
         const made = attachments.get(message.pane_id);
         if (made?.kind === "mirror" && made.fit) {
-          if (grid?.drives && claim?.fitGrid === grid && made.fit.lease?.owner === client) {
+          if (grid?.drives && claim?.fitGrid === grid) {
             Object.assign(grid, geometry);
-            fitPane(message.pane_id, made, client);
+            if (made.fit.lease?.owner === client) fitPane(message.pane_id, made, client);
           }
           return;
         }

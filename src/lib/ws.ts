@@ -1080,8 +1080,10 @@ export class HerdrSocket {
   }
 
   /** Explicitly takes the pane's attach slot; never queued or replayed on reconnect. */
-  takeOver(paneId: string): boolean {
-    if (!this.canTakeOver() || !this.attached.has(paneId)) return false;
+  takeOver(paneId: string, grid?: { cols: number; rows: number }): boolean {
+    const state = this.attached.get(paneId);
+    if (!this.canTakeOver() || !state) return false;
+    if (grid && state.fitOffered && !state.keepSize) this.resize(paneId, grid.cols, grid.rows, true);
     this.rawSend({ type: "take-over", pane_id: paneId });
     return true;
   }

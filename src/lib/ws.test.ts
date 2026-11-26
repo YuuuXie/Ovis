@@ -895,6 +895,26 @@ it("attaches a grid the chat lens covers without resizing the shared pty, on a r
   client.close();
 });
 
+it("offers the current local grid immediately before explicit Windows fit takeover", () => {
+  const client = new HerdrSocket("ws://test/ws");
+  client.connect();
+  const socket = FakeSocket.last;
+  socket.open();
+  try {
+    const pane = "w1:p1";
+    socket.receive(snapshot(["input-ready", "take-over"]));
+    client.attach(pane, 76, 24, false, true);
+    socket.receive({ type: "pane-geometry", pane_id: pane, cols: 120, rows: 40, fixed: true, windows_fit: true });
+    socket.receive({ type: "error", pane_id: pane, code: "attach_held", message: "held" });
+    const before = socket.sent.length;
+    expect(client.takeOver(pane, { cols: 44, rows: 15 })).toBe(true);
+    expect(socket.sent.slice(before)).toEqual([
+      { type: "resize", pane_id: pane, cols: 44, rows: 15 },
+      { type: "take-over", pane_id: pane },
+    ]);
+  } finally { client.close(); }
+});
+
 it("requests a fresh native fit after release, never by an observer or a replayed takeover", () => {
   const client = new HerdrSocket("ws://test/ws");
   client.connect();

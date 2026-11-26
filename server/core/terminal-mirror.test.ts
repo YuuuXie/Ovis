@@ -266,7 +266,8 @@ it.skipIf(process.platform === "win32")("invalidates deferred input across a Win
   const command = join(root, "control");
   writeFileSync(command, `#!${process.execPath}
 if (process.argv.includes("--takeover")) process.exit(1);
-console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+const size = (flag) => Number(process.argv[process.argv.indexOf(flag) + 1]);
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:size("--cols"),height:size("--rows"),encoding:"ansi",bytes:"QQ=="}));
 for await (const _ of console) {}
 `, { mode: 0o700 });
   const resumedMirror = Promise.withResolvers<void>();
@@ -292,8 +293,11 @@ for await (const _ of console) {}
     expect(idle.write("stale mirror")).toBe(false);
     await f.attach(b.client, claim);
     expect(registry.sight(b.client, "p").facts().currentHeld).toBe(true);
+    await f.resize(b.client, { type: "resize", pane_id: "p", cols: 44, rows: 15 });
+    expect(a.grids.at(-1)).toMatchObject({ cols: 80, rows: 24, fixed: false });
     f["take-over"](b.client, { type: "take-over", pane_id: "p" });
     await b.until(2);
+    expect(b.grids.at(-1)).toMatchObject({ cols: 44, rows: 15, fixed: false });
     expect(owned.facts().samePty).toBe(false);
     expect(owned.write("retired")).toBe(false);
     const second = registry.sight(b.client, "p");
