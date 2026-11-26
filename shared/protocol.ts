@@ -70,6 +70,8 @@ export type PaneContext = { used: number; window: number | null };
  * translated), and how far it is, 0 to 100.
  */
 export type HerdrPane = PaneInfo & {
+  /** Latest verified Copilot UI activity sample, for badges only. */
+  copilot_processing?: boolean;
   background_tasks?: number; background_wait?: true; plan?: PlanSummary; context?: PaneContext;
   parent_pane_id?: string;
   /** Stop on this pane cancels a keeper session rather than interrupting a TUI. */
@@ -819,7 +821,8 @@ export interface ConversationMetadata {
   provider?: string;
   /**
    * Claude Code's permission mode (`default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions`, `dontAsk`), as its
-   * transcript last recorded it or, for a Claude Ovis started, its hooks last told: absent when neither said it.
+   * transcript last recorded it or, for a Claude Ovis started, its hooks last told: absent when neither said it. For a
+   * Codex Ovis started, `plan` while its own server says the thread is in Plan mode, else absent.
    */
   permission_mode?: string;
 }
