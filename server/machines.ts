@@ -378,7 +378,7 @@ export function bridgeAgentNews(tell: () => void) {
 export class MachineManager {
   private machines = new Map<string, Runtime>();
   private jobs = new Map<string, JobState>();
-  private listeners = new Set<(event: MachineEvent) => void>();
+  private listeners = new Map<(event: MachineEvent) => void, "internal" | "roster">();
   private stopped = false;
   private readonly bridgeWork = new Map<string, Promise<void>>();
   private localBusy = false;
@@ -754,16 +754,19 @@ export class MachineManager {
     }
     return this.machines.get(pc)?.finishes.ended(epoch) ?? false;
   }
-  get rosterWatched(): boolean { return this.listeners.size > 0; }
+  get rosterWatched(): boolean {
+    for (const kind of this.listeners.values()) if (kind === "roster") return true;
+    return false;
+  }
 
-  subscribe(listener: (event: MachineEvent) => void): () => void {
-    this.listeners.add(listener);
+  subscribe(listener: (event: MachineEvent) => void, { internal = false } = {}): () => void {
+    this.listeners.set(listener, internal ? "internal" : "roster");
     listener({ type: "machines", machines: this.list() });
     return () => this.listeners.delete(listener);
   }
   private emit(event?: MachineEvent): void {
     if (this.stopped) return;
-    for (const listener of this.listeners) listener(event ?? { type: "machines", machines: this.list() });
+    for (const listener of this.listeners.keys()) listener(event ?? { type: "machines", machines: this.list() });
   }
   localMessage(message: ServerMessage): void {
     if (message.type === "pane-status" && this.localFinishes.stale(message.finish_epoch)) return;

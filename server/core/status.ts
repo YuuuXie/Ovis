@@ -1161,8 +1161,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     timer.unref?.();
     return () => clearInterval(timer);
   }))(cardPace);
+  const copilotRoster = { ...cardRoster, herdrLifetime: () => currentHerdrLifetime() };
   const activityTimer = setInterval(() => {
-    void copilotActivity.tick(cardRoster, () => broadcastAll({ type: "session-changed" }), clients.size > 0 || machines?.rosterWatched === true);
+    // Remote bridges already poll snapshots. Refresh the local roster without announcing a session replacement.
+    void copilotActivity.tick(copilotRoster, () => { void machines?.refreshLocal(); }, clients.size > 0 || machines?.rosterWatched === true);
   }, 3000);
   activityTimer.unref?.();
   plans.start();

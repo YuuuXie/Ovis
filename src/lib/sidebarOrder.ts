@@ -12,11 +12,14 @@ export function isSeenDone(pane: FinishPane, seen: SeenRecord): boolean {
 }
 
 export function copilotBadge(pane: FinishPane): "working" | "idle" | undefined {
-  if (pane.background_wait || pane.copilot_processing === undefined || !["working", "idle", "unknown"].includes(pane.agent_status)) return undefined;
+  if (pane.background_wait || pane.copilot_processing === undefined) return undefined;
+  if (pane.agent_status === "done") return pane.copilot_processing ? "working" : undefined;
+  if (!["working", "idle", "unknown"].includes(pane.agent_status)) return undefined;
   return pane.copilot_processing ? "working" : "idle";
 }
 
 export function shownStatus(pane: FinishPane, seen: SeenRecord | null): AgentStatus | undefined {
   if (pane.background_wait) return paneStatus(pane);
-  return copilotBadge(pane) ?? (seen && isSeenDone(pane, seen) ? "idle" : pane.agent_status);
+  if (pane.agent_status === "done") return seen && isSeenDone(pane, seen) ? copilotBadge(pane) ?? "idle" : "done";
+  return copilotBadge(pane) ?? pane.agent_status;
 }

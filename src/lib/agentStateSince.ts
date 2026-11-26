@@ -102,16 +102,20 @@ export function stateLooks(machines: readonly Machine[], status: (machineId: str
       id: machine.id,
       lifetime: machine.snapshot.herdr_lifetime ?? null,
       epoch: machine.snapshot.finish_epoch ?? null,
-      rows: sidebarAgents(machine.snapshot).map(({ pane }) => ({
-        pane: pane.pane_id,
-        terminal: pane.terminal_id,
-        state: stampState(agentGroup(status(machine.id, pane))),
-        seq: seqs.get(pane.pane_id),
-        finish: pane.finish_id,
-        done: knownStatus(pane.agent_status) === "done",
-        wait: pane.background_wait === true,
-        own: OWN_STATE_AGENTS.has(pane.agent ?? "") || copilotBadge(pane) !== undefined,
-      })),
+      rows: sidebarAgents(machine.snapshot).map(({ pane }) => {
+        const shown = status(machine.id, pane);
+        const badge = copilotBadge(pane);
+        return {
+          pane: pane.pane_id,
+          terminal: pane.terminal_id,
+          state: stampState(agentGroup(shown)),
+          seq: seqs.get(pane.pane_id),
+          finish: pane.finish_id,
+          done: knownStatus(pane.agent_status) === "done",
+          wait: pane.background_wait === true,
+          own: OWN_STATE_AGENTS.has(pane.agent ?? "") || (badge !== undefined && badge === shown),
+        };
+      }),
     };
   });
 }

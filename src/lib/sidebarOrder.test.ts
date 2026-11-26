@@ -23,6 +23,12 @@ describe("activity counters, independent of opened finishes", () => {
     expect(show("blocked", true)).toBe("blocked");
     expect(show("idle", true, true)).toBe("waiting");
   });
+  it("shows verified work after the preceding Copilot finish was read, but preserves an unread finish", () => {
+    const finished = { ...pane("p", "done", 2), copilot_processing: true };
+    expect(shownStatus(finished, { p: 1 })).toBe("done");
+    expect(shownStatus(finished, { p: 2 })).toBe("working");
+    expect(shownStatus({ ...finished, copilot_processing: false }, { p: 2 })).toBe("idle");
+  });
   it("ignores absent, nonnumeric and nonfinite counters", () => {
     const snapshot = snap({}, { valid: 7, text: 1, missing: 1, infinite: Infinity, nan: NaN });
     Object.assign(snapshot.agents[1]!, { state_change_seq: "9" });

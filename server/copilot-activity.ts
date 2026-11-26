@@ -4,6 +4,9 @@ import { agentProcesses } from "./conversation.ts";
 import { readCopilotForeground } from "./copilot-foreground.ts";
 import { paneProcessInfo } from "./herdr/client.ts";
 
+type CopilotRoster = Roster & { herdrLifetime(): string | undefined };
+type Sample = { readonly processing: boolean; readonly terminal: string; readonly herdr: string };
+
 async function processing(paneId: string): Promise<boolean | undefined> {
   const pid = async () => {
     const front = (await paneProcessInfo(paneId))?.foreground_processes;
@@ -19,7 +22,7 @@ async function processing(paneId: string): Promise<boolean | undefined> {
 
 /** A display-only sample: losing a listener or reading `false` is not a successful finish or permission to send. */
 export class CopilotActivity {
-  private readonly samples = new Map<string, boolean>();
+  private readonly samples = new Map<string, Sample>();
   private readonly reads = new Map<string, object>();
   private stopped = false;
   private cursor = 0;
@@ -40,14 +43,16 @@ export class CopilotActivity {
   apply(snapshot: SessionSnapshot): SessionSnapshot {
     if (!this.samples.size) return snapshot;
     return { ...snapshot, panes: snapshot.panes.map((pane) => {
-      const busy = pane.agent === "copilot" ? this.samples.get(pane.pane_id) : undefined;
-      return busy === undefined ? pane : { ...pane, copilot_processing: busy };
+      const sample = pane.agent === "copilot" ? this.samples.get(pane.pane_id) : undefined;
+      return sample && sample.herdr === snapshot.herdr_lifetime && sample.terminal === pane.terminal_id
+        ? { ...pane, copilot_processing: sample.processing } : pane;
     }) };
   }
 
-  async tick(roster: Roster, changed: () => void, watched = true): Promise<void> {
+  async tick(roster: CopilotRoster, changed: () => void, watched = true): Promise<void> {
     if (this.stopped || process.platform !== "linux") return;
-    if (!watched) {
+    const herdr = watched ? roster.herdrLifetime() : undefined;
+    if (herdr === undefined) {
       this.samples.clear();
       this.reads.clear();
       return;
@@ -60,18 +65,20 @@ export class CopilotActivity {
     const start = this.cursor;
     this.cursor = (start + batch) % panes.length;
     const changes = await Promise.all(Array.from({ length: batch }, async (_, i) => {
-      const id = panes[(start + i) % panes.length]!.pane_id;
+      const { pane_id: id, terminal_id: terminal } = panes[(start + i) % panes.length]!;
       if (this.reads.has(id)) return false;
       const token = {};
       this.reads.set(id, token);
       const lifetime = roster.lifetime(id);
       try {
         const busy = await this.read(id).catch(() => undefined);
-        if (this.stopped || this.reads.get(id) !== token || lifetime !== roster.lifetime(id) || roster.pane(id)?.agent !== "copilot") return false;
+        const pane = roster.pane(id);
+        if (this.stopped || this.reads.get(id) !== token || lifetime !== roster.lifetime(id)
+          || herdr !== roster.herdrLifetime() || pane?.agent !== "copilot" || pane.terminal_id !== terminal) return false;
         const last = this.samples.get(id);
         if (busy === undefined) this.samples.delete(id);
-        else this.samples.set(id, busy);
-        return busy !== last;
+        else this.samples.set(id, { processing: busy, terminal, herdr });
+        return busy !== (last?.herdr === herdr && last.terminal === terminal ? last.processing : undefined);
       } finally {
         if (this.reads.get(id) === token) this.reads.delete(id);
       }
