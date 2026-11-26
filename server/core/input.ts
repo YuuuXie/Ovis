@@ -183,7 +183,7 @@ export function createInputLane({ TYPED_SETTLE_MS, KEY_SETTLE_MS, clients, acp, 
           if (viaAttach) {
             if (!allowed() || !sighting.write(shaped, message.automatic === true)) { inputFailed(); return; }
             typedIntoPty(text);
-            if (cursorKey !== null) personTyped(message.pane_id);
+            if (cursorKey !== null || (windowsControl && message.automatic !== true && !isMouseReport(text))) personTyped(message.pane_id);
             receipt(true);
             return;
           }

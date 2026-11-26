@@ -60,6 +60,20 @@ it("brackets a fitted Windows agent's multiline paste before sending the followi
   expect(live.results()).toMatchObject([{ id: 1, ok: true }, { id: 2, ok: true }]);
 });
 
+it("counts a fitted Windows keystroke queued behind another send, but not a mouse report", async () => {
+  const pane = "w:p1";
+  const live = lane(true, Object.create(WindowsControl.prototype));
+  const blocked = Promise.withResolvers<void>();
+  void live.serialize(pane, () => blocked.promise);
+  live.inputFrames.input(live.phone, { type: "input", pane_id: pane, text: "a", id: 1 });
+  live.inputFrames.input(live.phone, { type: "input", pane_id: pane, text: "\x1b[<0;10;5M" });
+  const beforeTyping = live.typedInto(pane);
+  blocked.resolve();
+  await live.serialize(pane, () => {});
+  expect(live.results()).toMatchObject([{ id: 1, ok: true }]);
+  expect(live.typedInto(pane) - beforeTyping).toBe(1);
+});
+
 it.skipIf(!keeperBuilt)("Stop cancels the running ACP turn instead of typing into its terminal", async () => {
   const root = keeperRoot();
   const keeper = await startKeeper(root);
