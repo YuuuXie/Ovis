@@ -6,7 +6,7 @@ import { CoreAttachSession } from "../herdr-core/attach-session.ts";
 import { type SightingFacts, sightingFacts } from "../input-guard.ts";
 import { OUTPUT_HARD_BYTES, OUTPUT_HIGH_BYTES, OUTPUT_STALL_MS, OutputWindow, ReplayBuffer, wireBytes } from "../output-window.ts";
 import { backlog, type Client, connectionOf, send } from "./connections.ts";
-import { ATTACH_HELD_MESSAGE, createSpawnAttachment, type MirrorAttachment, type PaneAttachment, type PtyAttachment } from "./terminal-process.ts";
+import { ATTACH_HELD_MESSAGE, ATTACH_READ_RACE_RE, ATTACH_RETRY_MAX_MS, ATTACH_RETRY_MS, createSpawnAttachment, type MirrorAttachment, type PaneAttachment, type PtyAttachment } from "./terminal-process.ts";
 import { WindowsControl } from "../windows-control.ts";
 
 const DETACHED_CONVERSATION_WATCHES = 32;
@@ -148,6 +148,8 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     const fit = a.fit, lease = fit?.lease;
     if (!fit || !lease || (owner && owner !== lease.owner)) return;
     delete fit.lease;
+    clearTimeout(a.retry);
+    a.retry = undefined;
     fit.epoch++;
     fit.passiveMirrors.clear();
     a.process.suspendScreen(true);
@@ -215,7 +217,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
     // Taking our own slot needs no --takeover after release. If a third party gets it
     // in the gap, that is a different holder, not the one the user asked to displace.
     const knownExternal = fit.blocked.get(owner) === "external";
-    const takeExternal = takeover && !fit.lease && fit.slot === "held" && knownExternal;
+    let takeExternal = takeover && !fit.lease && fit.slot === "held" && knownExternal;
     if (fit.blocked.has(owner)) fit.blocked.set(owner, "retrying");
     if (fit.lease) {
       fitHeld(a, fit.lease.owner, pane, "local");
@@ -234,8 +236,32 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       else if (!fit.slot && !fit.blocked.has(member)) send(member, { type: "error", code: "input_not_ready", pane_id: pane,
         message: "Another viewer is opening this Windows terminal for input." });
     }
-    const failed = (held: boolean) => {
+    let readDeadline: number | undefined;
+    let readRetries = 0;
+    const failed = (held: boolean, reason?: string) => {
       if (!valid()) return;
+      if (!lease.granted && lease.session && reason && ATTACH_READ_RACE_RE.test(reason)) {
+        const now = Date.now();
+        const deadline = readDeadline ??= now + retryFor;
+        if (now < deadline) {
+          // A read refusal says nothing about who owns the slot. Probe without
+          // takeover, retaining the current claim but letting its fixed screen draw.
+          takeExternal = false;
+          a.process.suspendScreen(false);
+          void lease.session.exited.then(() => {
+            if (!valid()) return;
+            const delay = Math.min(ATTACH_RETRY_MS * 2 ** readRetries++, ATTACH_RETRY_MAX_MS, deadline - Date.now());
+            a.retry = setTimeout(() => {
+              a.retry = undefined;
+              if (!valid()) return;
+              if (Date.now() < deadline) start(); else failed(false, reason);
+            }, Math.max(0, delay));
+          });
+          return;
+        }
+        // The known read race already used its whole retry window.
+        retryFailure = false;
+      }
       fit.slot = held ? "held" : "uncertain";
       if (held) {
         if (knownExternal && !lease.granted) fit.blocked.set(owner, "external");

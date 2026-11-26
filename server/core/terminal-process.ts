@@ -20,7 +20,7 @@ const MAX_REPLAY_BYTES = 128 * 1024;
  * up to 15 s, and 5 more to restore it (herdr 0.9, src/server/alt_screen_read.rs). A
  * 400-line read of an idle Codex pane took about a second, refusing every attach meanwhile.
  */
-const ATTACH_READ_RACE_RE = /has a read in progress; retry/;
+export const ATTACH_READ_RACE_RE = /has a read in progress; retry/;
 /**
  * herdr's refusal when another client holds the terminal's one attach slot. It is the attach's
  * last line, after its teardown: the same words earlier in the pane's own output are not it.
@@ -28,8 +28,8 @@ const ATTACH_READ_RACE_RE = /has a read in progress; retry/;
 const ATTACH_HELD_RE = /terminal attach failed: [^\r\n]*(?:already has an attached client|retry with --takeover)[^\r\n]*\s*$/;
 /** how long refused attaches are retried: herdr's longest read of that kind */
 export const ATTACH_RETRY_FOR_MS = 20_000;
-const ATTACH_RETRY_MS = 50;
-const ATTACH_RETRY_MAX_MS = 500;
+export const ATTACH_RETRY_MS = 50;
+export const ATTACH_RETRY_MAX_MS = 500;
 /** a refused attach says so within milliseconds of its first bytes: those are held this long */
 export const ATTACH_HOLD_MS = 100;
 /**

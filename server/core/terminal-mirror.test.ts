@@ -87,16 +87,43 @@ function recorder(onMessage?: (frame: Frame) => void, readOnly = false) {
   return { client, frames, grids, until };
 }
 
-function registryFor(clients: Client[], nativeControl?: (socket: string) => Promise<string | null>, holdPending = (_client: Client, _pane?: string) => {}) {
+function registryFor(clients: Client[], nativeControl?: (socket: string) => Promise<string | null>, holdPending = (_client: Client, _pane?: string) => {}, retryFor = 0) {
   return createTerminalRegistry({
     options: {}, clients: new Set(clients), stopped: () => false,
     terminalAttach: async () => false, nativeControl,
-    holdFor: 0, heldRetry: 0, retryFor: 0, relookupFor: 0,
+    holdFor: 0, heldRetry: 0, retryFor, relookupFor: 0,
     holdPending, holdPendingPane() {}, attached() {}, inputReady() {}, end() {},
   });
 }
 
 const attach = { type: "attach", pane_id: "p", cols: 80, rows: 24, flow_control: "ack" } as const;
+
+it.skipIf(process.platform === "win32")("recovers Windows fit after more than two history read refusals", async () => {
+  const command = join(root, "busy-control");
+  writeFileSync(command, `#!${process.execPath}
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
+const log = import.meta.path + ".attempts";
+const count = existsSync(log) ? readFileSync(log, "utf8").length : 0;
+appendFileSync(log, ".");
+if (count < 3) {
+  console.log(JSON.stringify({type:"terminal.closed",reason:"terminal attach failed: terminal t has a read in progress; retry"}));
+  process.exit(0);
+}
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+for await (const _ of console) {}
+`, { mode: 0o700 });
+  const result = Promise.withResolvers<Frame>();
+  const owner = recorder(frame => {
+    if (frame.code === "input_not_ready" || (frame.type === "input-ready" && frame.ready !== false)) result.resolve(frame);
+  });
+  const registry = registryFor([owner.client], async () => command, undefined, 2_000);
+  try {
+    await registry.terminalFrames.attach(owner.client, { ...attach, windows_fit: true });
+    expect((await result.promise).type).toBe("input-ready");
+    expect(registry.sight(owner.client, "p").facts().ready).toBe(true);
+    expect(readFileSync(`${command}.attempts`, "utf8")).toBe("....");
+  } finally { registry.closeAttachments(); }
+});
 
 it.skipIf(process.platform === "win32")("delivers accepted fit input before an explicit detach gives up the slot", async () => {
   const command = join(root, "draining-control");

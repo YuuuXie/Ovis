@@ -31,7 +31,7 @@ export interface WindowsControlOptions extends Grid {
   target: string;
   takeover: boolean;
   onFrame(data: string, grid: Grid, full: boolean): void;
-  onEnd(held: boolean): void;
+  onEnd(held: boolean, reason?: string): void;
 }
 
 /** One non-reconnecting child per grant. Never write into a replacement process. */
@@ -50,10 +50,10 @@ export class WindowsControl {
     this.child = Bun.spawn([options.command, "terminal", "session", "control", options.target,
       "--cols", String(options.cols), "--rows", String(options.rows), ...(options.takeover ? ["--takeover"] : [])],
     { env, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
-    const ended = (held: boolean) => {
+    const ended = (held: boolean, reason?: string) => {
       if (!this.live || this.leaving) return;
       this.kill();
-      options.onEnd(held);
+      options.onEnd(held, reason);
     };
     this.opening = setTimeout(() => ended(false), 15_000);
     this.opening.unref?.();
@@ -66,7 +66,7 @@ export class WindowsControl {
         options.onFrame(data, { cols, rows }, full);
       },
       onEnd: (reason) => {
-        ended(/already has an attached client|taken over|takeover/i.test(reason ?? ""));
+        ended(/already has an attached client|taken over|takeover/i.test(reason ?? ""), reason);
       },
     });
     const pump = async () => {
