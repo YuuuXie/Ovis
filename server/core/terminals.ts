@@ -271,6 +271,11 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
               a.cols = grid.cols; a.rows = grid.rows;
               for (const member of a.clients) send(member, { type: "pane-geometry", pane_id: pane, ...grid, fixed: member !== owner, windows_fit: true });
             }
+            // End the owner's output recovery before its first paint can be parsed.
+            if (first && valid()) {
+              if (fit.blocked.delete(owner)) send(owner, { type: "attach-resumed", pane_id: pane });
+              send(owner, { type: "input-ready", pane_id: pane });
+            }
             if (full) {
               a.replay = new ReplayBuffer(128 * 1024);
               fit.passiveMirrors.clear();
@@ -282,8 +287,6 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
             }
             reconcileOutput(pane);
             if (first && valid()) {
-              if (fit.blocked.delete(owner)) send(owner, { type: "attach-resumed", pane_id: pane });
-              send(owner, { type: "input-ready", pane_id: pane });
               inputReady(pane);
               if (lease.cols !== initial.cols || lease.rows !== initial.rows) lease.session?.resize(lease.cols, lease.rows);
             }

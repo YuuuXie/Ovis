@@ -166,7 +166,12 @@ for await (const _ of console) {}
 `, { mode: 0o700 });
   const readiness: Frame[] = [];
   const viewer = recorder(frame => { if (frame.type === "input-ready") readiness.push(frame); }, true);
-  const owner = recorder();
+  const ownerOrder: string[] = [];
+  const owner = recorder(frame => {
+    if (frame.type === "input-ready") ownerOrder.push(frame.ready === false ? "pending" : "ready");
+    if (frame.type === "pane-geometry" && frame.fixed === false) ownerOrder.push("grid");
+    if (frame.type === "pty-data") ownerOrder.push("screen");
+  });
   const registry = registryFor([viewer.client, owner.client], async () => command);
   try {
     await registry.terminalFrames.attach(viewer.client, attach);
@@ -175,6 +180,7 @@ for await (const _ of console) {}
     await registry.terminalFrames.attach(owner.client, { ...attach, windows_fit: true });
     expect((await viewer.until(2))[1]?.data).toBe("controlled screen");
     expect(readiness).toEqual([{ type: "input-ready", pane_id: "p" }]);
+    expect(ownerOrder).toEqual(["pending", "grid", "ready", "screen"]);
     expect(registry.sight(viewer.client, "p").write("observer input")).toBe(false);
   } finally { registry.closeAttachment("p"); }
 });
