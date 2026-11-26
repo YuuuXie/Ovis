@@ -8,7 +8,7 @@ import { isMouseReport, isTerminalReply, typingGuards } from "../input-guard.ts"
 import { HerdrError, paneRead, paneSendKeys, paneSendText } from "../herdr/client.ts";
 import { secretPrompt, validSecret } from "../../shared/secret-prompt.ts";
 import { insertTextProblem } from "../../shared/terminal-insert.ts";
-import { mirrorInput } from "../mirror-input.ts";
+import { mirrorInput, needsMirrorPaste } from "../mirror-input.ts";
 import { WindowsControl } from "../windows-control.ts";
 import { CoreAttachSession, CURSOR_KEY, CURSOR_KEY_NAMES } from "../herdr-core/attach-session.ts";
 
@@ -151,7 +151,9 @@ export function createInputLane({ TYPED_SETTLE_MS, KEY_SETTLE_MS, clients, acp, 
       // the attach's cursor mode may be older than the program's while hc's stream is paused: the key goes as hc's named
       // key then, which hc encodes from its own screen, in its turn behind what was typed before it
       const namedKey = () => (cursorKey !== null && !coreAttach!.modeCurrent ? CURSOR_KEY_NAMES[cursorKey[1]!]! : null);
-      if ((paneQueues.has(message.pane_id) && !reply) || stop || namedKey() !== null) {
+      const windowsControl = sighting.pty instanceof WindowsControl;
+      const shapePaste = windowsControl && message.automatic !== true && needsMirrorPaste(message.text);
+      if ((paneQueues.has(message.pane_id) && !reply) || stop || namedKey() !== null || shapePaste) {
         const text = message.text;
         // a click or a wheel (a click replayed behind a held arrow) is the attach's own mouse:
         // herdr encodes it for the program's mouse mode, send_text would type its bytes (#667).
@@ -159,12 +161,13 @@ export function createInputLane({ TYPED_SETTLE_MS, KEY_SETTLE_MS, clients, acp, 
         // only what the browser's terminal made itself, so a paste of the same bytes is still typed
         // A lone cursor key typed into a herdr-core attach goes there too, which sends it in the form the program reads
         // when its turn comes, not the one the viewer's terminal believed in when it was pressed
-        const viaAttach = sighting.pty instanceof WindowsControl || cursorKey !== null || isMouseReport(text) || (message.automatic === true && isTerminalReply(text));
+        const viaAttach = windowsControl || cursorKey !== null || isMouseReport(text) || (message.automatic === true && isTerminalReply(text));
         // typed into the attach it saw: one that ended meanwhile (and was attached again) takes none of it
         const roles = connectionOf(client).roles;
         const allowed = () => mayType(client) && connectionOf(client).roles === roles && typingGuards.queuedTyping(sighting.facts());
         void serialize(message.pane_id, async () => {
           if (stop || namedKey() !== null) await settleAfterTyping(message.pane_id);
+          const shaped = shapePaste ? await mirrorInput(text, () => paneAgentOf(message.pane_id)) : text;
           if (!typingGuards.queuedTyping(sighting.facts())) { inputFailed(); return; }
           // nothing typed outlives its connection
           if (!clients.has(client)) return;
@@ -178,7 +181,7 @@ export function createInputLane({ TYPED_SETTLE_MS, KEY_SETTLE_MS, clients, acp, 
             return;
           }
           if (viaAttach) {
-            if (!allowed() || !sighting.write(text, message.automatic === true)) { inputFailed(); return; }
+            if (!allowed() || !sighting.write(shaped, message.automatic === true)) { inputFailed(); return; }
             typedIntoPty(text);
             if (cursorKey !== null) personTyped(message.pane_id);
             receipt(true);
