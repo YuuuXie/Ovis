@@ -98,6 +98,37 @@ function registryFor(clients: Client[], nativeControl?: (socket: string) => Prom
 
 const attach = { type: "attach", pane_id: "p", cols: 80, rows: 24, flow_control: "ack" } as const;
 
+it.skipIf(process.platform === "win32")("delivers accepted fit input before an explicit detach gives up the slot", async () => {
+  const command = join(root, "draining-control");
+  writeFileSync(command, `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+if (process.argv.includes("80")) {
+  const input = [];
+  for await (const line of console) {
+    const frame = JSON.parse(line);
+    if (frame.type === "terminal.input") input.push(frame.text);
+    if (frame.type === "terminal.release") {
+      appendFileSync(import.meta.path + ".typed", input.join(""));
+      process.exit(0);
+    }
+  }
+} else for await (const _ of console) {}
+`, { mode: 0o700 });
+  const owner = recorder(), waiting = recorder();
+  const registry = registryFor([owner.client, waiting.client], async () => command);
+  const frames = registry.terminalFrames;
+  try {
+    await frames.attach(owner.client, { ...attach, windows_fit: true });
+    await owner.until(1);
+    await frames.attach(waiting.client, { ...attach, cols: 65, windows_fit: true });
+    expect(registry.sight(owner.client, "p").write("accepted")).toBe(true);
+    frames.detach(owner.client, { type: "detach", pane_id: "p" });
+    await waiting.until(2);
+    expect(readFileSync(`${command}.typed`, "utf8")).toBe("accepted");
+  } finally { registry.closeAttachments(); }
+});
+
 it.skipIf(process.platform === "win32")("explains why a fixed-size viewer cannot type after an uncertain controller exit", async () => {
   const command = join(root, "lost-control");
   writeFileSync(command, `#!${process.execPath}

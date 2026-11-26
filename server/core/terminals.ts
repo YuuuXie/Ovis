@@ -59,7 +59,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   // herdr releases its exclusive attach slot only after the old process exits.
   const retiringAttachments = new Map<string, Promise<void>>();
   // A viewer that gave up its claim still owns any input its attach is draining.
-  const drainingAttachments = new Map<string, { readonly owner: Client; readonly process: PtyAttachment["process"] }>();
+  const drainingAttachments = new Map<string, { readonly owner: Client; readonly process: PtyAttachment["process"] | WindowsControl }>();
 
   function follows(client: Client, paneId: string): boolean {
     return !connectionOf(client).closing && client.readyState === WebSocket.OPEN
@@ -144,7 +144,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       message: "Windows terminal control could not be confirmed. Open the terminal to retry input." });
   }
 
-  function retireFit(pane: string, a: MirrorAttachment, owner?: Client, afterFailure?: () => void): void {
+  function retireFit(pane: string, a: MirrorAttachment, owner?: Client, afterFailure?: () => void, own = false): void {
     const fit = a.fit, lease = fit?.lease;
     if (!fit || !lease || (owner && owner !== lease.owner)) return;
     delete fit.lease;
@@ -165,12 +165,17 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       }
     };
     if (lease.session) {
+      const draining = own && lease.granted ? { owner: lease.owner, process: lease.session } : undefined;
       const retired = lease.session.exited.finally(() => {
         if (fit.retiring === retired) delete fit.retiring;
+        if (draining && drainingAttachments.get(pane) === draining) drainingAttachments.delete(pane);
         resumeMirror();
       });
       fit.retiring = retired;
-      lease.session.kill();
+      if (draining) {
+        drainingAttachments.set(pane, draining);
+        draining.process.leave();
+      } else lease.session.kill();
     } else queueMicrotask(resumeMirror);
   }
 
@@ -289,6 +294,9 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
   }
 
   function releaseFit(client: Client): void {
+    for (const draining of drainingAttachments.values()) {
+      if (draining.owner === client && draining.process instanceof WindowsControl) draining.process.kill();
+    }
     for (const pane of client.data.attached.keys()) {
       const a = attachments.get(pane);
       const grid = client.data.attached.get(pane)?.fitGrid;
@@ -449,7 +457,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       attachment.fit?.blocked.delete(client);
       if (attachment.fit?.passiveMirrors.delete(client) && !attachment.fit.passiveMirrors.size && attachment.fit.lease?.granted)
         attachment.process.suspendScreen(true);
-      retireFit(paneId, attachment, client);
+      retireFit(paneId, attachment, client, undefined, own && wasAttached);
     }
     if (attachment.driver === client) attachment.driver = undefined;
     if (attachment.clients.size === 0) closeAttachment(paneId, own && wasAttached ? client : undefined);
@@ -458,9 +466,7 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
 
   function detachClaimed(client: Client): void {
     for (const paneId of client.data.attached.keys()) detach(paneId, client);
-    for (const [paneId, draining] of drainingAttachments) {
-      if (draining.owner === client) closeAttachment(paneId);
-    }
+    for (const draining of drainingAttachments.values()) if (draining.owner === client) draining.process.kill();
   }
 
   function dropClaims(client: Client): void {

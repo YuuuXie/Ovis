@@ -1,4 +1,4 @@
-import { terminalEnv, writeLine } from "./pty/session.ts";
+import { LEAVE_WITHIN_MS, terminalEnv, writeLine } from "./pty/session.ts";
 import { WatchStreamParser } from "./watch.ts";
 
 type Grid = { cols: number; rows: number };
@@ -40,6 +40,7 @@ export class WindowsControl {
   private readonly child;
   private live = true;
   private granted = false;
+  private leaving?: ReturnType<typeof setTimeout>;
   private resumeRead?: ReturnType<typeof Promise.withResolvers<void>>;
   private readonly opening: ReturnType<typeof setTimeout>;
   constructor(options: WindowsControlOptions) {
@@ -50,7 +51,7 @@ export class WindowsControl {
       "--cols", String(options.cols), "--rows", String(options.rows), ...(options.takeover ? ["--takeover"] : [])],
     { env, stdin: "pipe", stdout: "pipe", stderr: "ignore" });
     const ended = (held: boolean) => {
-      if (!this.live) return;
+      if (!this.live || this.leaving) return;
       this.kill();
       options.onEnd(held);
     };
@@ -59,7 +60,7 @@ export class WindowsControl {
     const parser = new WatchStreamParser({
       onFrame() {},
       onScreen: (data, cols, rows, full) => {
-        if (!this.live || (!this.granted && !full)) return;
+        if (!this.live || this.leaving || (!this.granted && !full)) return;
         if (!this.granted) clearTimeout(this.opening);
         this.granted = true;
         options.onFrame(data, { cols, rows }, full);
@@ -82,19 +83,30 @@ export class WindowsControl {
         if (this.live) { parser.push(decoder.decode()); parser.finish(); }
       } finally { reader.releaseLock(); ended(false); }
     };
-    this.exited = Promise.all([pump().catch(() => {}), this.child.exited]).then(() => {});
+    this.exited = Promise.all([pump().catch(() => {}), this.child.exited]).then(() => {
+      clearTimeout(this.leaving);
+      this.live = false;
+    });
   }
   private send(frame: object): boolean {
-    return this.live && this.granted && writeLine(this.child.stdin, `${JSON.stringify(frame)}\n`);
+    return this.live && this.granted && !this.leaving && writeLine(this.child.stdin, `${JSON.stringify(frame)}\n`);
   }
   resize(cols: number, rows: number): boolean { return this.send({ type: "terminal.resize", cols, rows }); }
   write(text: string): boolean { return this.send({ type: "terminal.input", text }); }
   pause(): void { this.resumeRead ??= Promise.withResolvers<void>(); }
   resume(): void { this.resumeRead?.resolve(); this.resumeRead = undefined; }
+  leave(): void {
+    if (this.leaving) return;
+    this.resume();
+    // The control CLI reads release on the same stdin as the input it accepted.
+    if (!this.send({ type: "terminal.release" })) { this.kill(); return; }
+    this.leaving = setTimeout(() => this.kill(), LEAVE_WITHIN_MS);
+  }
   kill(): void {
     if (!this.live) return;
     this.live = false;
     clearTimeout(this.opening);
+    clearTimeout(this.leaving);
     this.resume();
     this.child.kill();
   }
