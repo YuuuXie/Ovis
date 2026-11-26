@@ -789,6 +789,8 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       if (claudeAgents.loopTold(paneId) !== resumed) tellQueue(paneId);
       return;
     }
+    // A sample taken (or begun) before Herdr reported new work cannot describe that turn.
+    if (agent === "copilot" && read === "working") copilotActivity.forget(paneId);
     if (reconcileProviderStatus(omo, gjc, { pane_id: paneId, agent })) completions.forget(paneId);
     const named = [{ pane_id: paneId, agent: omo.runs(paneId) ? "omo" : gjc.runs(paneId) ? "gjc" : agent }];
     if (machines) machines.localAgents(named); else bridgeAgents!.status(named);

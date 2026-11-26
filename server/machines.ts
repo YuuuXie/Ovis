@@ -2771,11 +2771,13 @@ export class MachineManager {
 }
 
 export function paneAfterStatus(p: HerdrPane, message: Extract<ServerMessage, { type: "pane-status" }>): HerdrPane {
-  const { background_tasks: before, background_wait: _waited, plan: planBefore, context: contextBefore, finish_id: _finish, ...pane } = p;
+  const { background_tasks: before, background_wait: _waited, plan: planBefore, context: contextBefore, finish_id: _finish, copilot_processing: processing, ...pane } = p;
   const tasks = message.background_tasks === undefined ? before : message.background_tasks > 0 ? message.background_tasks : undefined;
   const plan = message.plan === undefined ? planBefore : message.plan ?? undefined;
   const context = message.context === undefined ? contextBefore : message.context ?? undefined;
-  return { ...pane, agent_status: message.agent_status, ...(message.finish_id === undefined ? {} : { finish_id: message.finish_id }), ...(tasks === undefined ? {} : { background_tasks: tasks }), ...(message.background_wait ? { background_wait: true } : {}), ...(plan === undefined ? {} : { plan }), ...(context === undefined ? {} : { context }) };
+  const started = message.agent_status === "working" && p.agent_status !== "working";
+  const sample = started && processing === false ? undefined : processing;
+  return { ...pane, agent_status: message.agent_status, ...(sample === undefined ? {} : { copilot_processing: sample }), ...(message.finish_id === undefined ? {} : { finish_id: message.finish_id }), ...(tasks === undefined ? {} : { background_tasks: tasks }), ...(message.background_wait ? { background_wait: true } : {}), ...(plan === undefined ? {} : { plan }), ...(context === undefined ? {} : { context }) };
 }
 
 function snapshotAfterStatus(snapshot: SessionSnapshot, message: Extract<ServerMessage, { type: "pane-status" }>): SessionSnapshot {
