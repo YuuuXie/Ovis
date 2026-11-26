@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mirrorFrame } from "../mirror.ts";
-import { connectionData, connectionOf, type Client } from "./connections.ts";
+import { connectionData, type Client } from "./connections.ts";
 import { createTerminalRegistry } from "./terminals.ts";
 
 type Frame = Record<string, unknown> & { type: string };
@@ -59,12 +59,12 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function recorder(onMessage?: (frame: Frame) => void) {
+function recorder(onMessage?: (frame: Frame) => void, readOnly = false) {
   const frames: Frame[] = [];
   const grids: Frame[] = [];
   const waiters: { count: number; done: () => void }[] = [];
   const client = {
-    data: connectionData({ deviceId: undefined, readOnly: false }),
+    data: connectionData({ deviceId: undefined, readOnly }),
     readyState: WebSocket.OPEN,
     getBufferedAmount: () => 0,
     send(raw: string) {
@@ -134,8 +134,7 @@ console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,e
 for await (const _ of console) {}
 `, { mode: 0o700 });
   const readiness: Frame[] = [];
-  const viewer = recorder(frame => { if (frame.type === "input-ready") readiness.push(frame); });
-  connectionOf(viewer.client).mode = "observe";
+  const viewer = recorder(frame => { if (frame.type === "input-ready") readiness.push(frame); }, true);
   const owner = recorder();
   const registry = registryFor([viewer.client, owner.client], async () => command);
   try {
