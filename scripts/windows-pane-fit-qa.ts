@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { chromium, type Page } from "playwright-core";
 import { chromePath } from "./chrome-path.ts";
 import { shownRow } from "./shown-rows.ts";
+import { checkWindowsFitDemotion } from "./windows-fit-demotion.ts";
 import type { ClientMessage, ServerMessage } from "../shared/protocol.ts";
 
 /** Run only with a disposable named daemon and private state; never discover a user's default socket. */
@@ -166,10 +167,13 @@ try {
   other.send({ type: "resize", pane_id: pane, cols: 120, rows: 40 }); await other.grid(120, 40);
   assert.equal(await consoleSize(), "120x40");
   console.log(`PASS observer, keep-size, exclusive claim, explicit takeover, retired owner and real console 120x40 -> 40x15 -> 67x24 -> 120x40 (unattached: ${original})`);
-  other.send({ type: "role", mode: "observe" });
-  await other.wait(f => f.type === "role-ack" && f.mode === "observe", "demotion");
-  other.send({ type: "resize", pane_id: pane, cols: 29, rows: 11 });
-  await other.wait(f => f.type === "error" && f.code === "read_only", "retired controller cannot resize");
+  // Clear the earlier claimant so it cannot take the slot before the demotion probe.
+  owner.send({ type: "detach", pane_id: pane });
+  owner.send({ type: "ping", id: 3 });
+  await owner.wait(f => f.type === "pong" && f.id === 3, "earlier claimant detached");
+  const afterDemotion = await checkWindowsFitDemotion(other, () => connect("interact"), pane);
+  assert.equal(await consoleSize(), afterDemotion);
+  console.log("PASS demotion releases native control before the demoted socket closes");
   for (const ws of sockets) ws.close();
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
