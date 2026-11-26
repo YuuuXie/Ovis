@@ -44,7 +44,8 @@ export class WindowsControl {
   private resumeRead?: ReturnType<typeof Promise.withResolvers<void>>;
   private readonly opening: ReturnType<typeof setTimeout>;
   constructor(options: WindowsControlOptions) {
-    const env = terminalEnv({ HERDR_SOCKET_PATH: options.socket });
+    // Herdr derives its client socket from the API path and adds the pipe prefix itself.
+    const env = terminalEnv({ HERDR_SOCKET_PATH: options.socket.replace(/^\\\\\.\\pipe\\/i, "") });
     delete env["HERDR_SESSION"];
     delete env["HERDR_CLIENT_SOCKET_PATH"];
     this.child = Bun.spawn([options.command, "terminal", "session", "control", options.target,
