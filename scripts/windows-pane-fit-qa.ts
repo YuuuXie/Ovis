@@ -43,9 +43,9 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
   // Two independent devices: opening the small browser must not hide the owner or release its size.
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   try {
-    const page = await browser.newPage({ viewport: { width: 580, height: 720 } });
+    const page = await browser.newPage({ viewport: { width: 580, height: 720 }, locale: "en-US" });
     type Grid = { cols: number; rows: number };
-    type Receipt = { fixed?: Grid; granted?: Grid; beforeData?: Grid; cellWidth?: number };
+    type Receipt = { held?: boolean; fixed?: Grid; granted?: Grid; beforeData?: Grid; cellWidth?: number };
     type Probe = { fitQa: Receipt };
     const receipt = () => page.evaluate(() => (window as unknown as Probe).fitQa);
     await page.addInitScript((target: string) => {
@@ -58,7 +58,9 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
           this.addEventListener("message", event => {
             const m = JSON.parse(String(event.data)) as ServerMessage;
             if (!("pane_id" in m) || m.pane_id !== target) return;
-            if (m.type === "pane-geometry" && m.windows_fit) {
+            if (m.type === "error" && m.code === "attach_held") {
+              state.held = true;
+            } else if (m.type === "pane-geometry" && m.windows_fit) {
               const grid = { cols: m.cols, rows: m.rows };
               if (m.fixed) state.fixed = grid;
               if (m.fixed === false) state.granted = grid;
@@ -74,6 +76,9 @@ async function browserTakeover(url: string, previous: { cols: number; rows: numb
       Object.assign(window, { WebSocket: Recording });
     }, pane);
     await page.goto(url);
+    await page.waitForFunction(() => (window as unknown as Probe).fitQa.held).catch(cause => {
+      throw new Error("Second browser did not receive attach_held", { cause });
+    });
     const openHere = page.getByRole("button", { name: "Open here", exact: true });
     await openHere.waitFor();
     await page.waitForFunction(({ cols, rows }) => {
