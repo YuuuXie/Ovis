@@ -436,12 +436,16 @@ export class HerdrSocket {
       }
       // The server can force this connection to observe. Apply its authority before
       // waking pending submits or notifying UI handlers about the acknowledged role.
+      let reclaimFit: AttachState | undefined;
       if (message.type === "pane-geometry" && message.windows_fit) {
         const state = this.attached.get(message.pane_id);
         if (state) {
           if (state.pendingKeptFit && message.fixed) {
-            state.keepSize = true;
-            state.releaseSizeOwed = false;
+            if (!state.keepSize && this.mode === "interact") reclaimFit = state;
+            else {
+              state.keepSize = true;
+              state.releaseSizeOwed = false;
+            }
           }
           delete state.pendingKeptFit;
           state.fitOffered = true;
@@ -565,6 +569,10 @@ export class HerdrSocket {
         return;
       }
       this.emit(message);
+      if (message.type === "pane-geometry" && reclaimFit && this.attached.get(message.pane_id) === reclaimFit
+        && !reclaimFit.keepSize && this.mode === "interact") {
+        this.attach(message.pane_id, reclaimFit.cols, reclaimFit.rows, false, true);
+      }
       if (this.featuresKnown && pendingNotices.length > 0) {
         const confirmed = pendingNotices.splice(0);
         if (this.accountOpensAll()) for (const notice of confirmed) this.emit(notice);

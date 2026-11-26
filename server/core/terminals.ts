@@ -135,6 +135,11 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
 
   const { spawnAttachment } = createSpawnAttachment({ herdrFailure: options.herdrFailure, attachments, retiringAttachments, terminalAttach, nativeControl, isStopped: stopped, closeAttachment, broadcast, sendOutput, reconcileOutput, holdPendingPane, inputReady, holdFor, heldRetry, retryFor, relookupFor });
 
+  function fitInputUnavailable(client: Client, pane: string): void {
+    send(client, { type: "error", code: "input_not_ready", pane_id: pane,
+      message: "Windows terminal control could not be confirmed. Open the terminal to retry input." });
+  }
+
   function retireFit(pane: string, a: MirrorAttachment, owner?: Client, afterFailure?: () => void): void {
     const fit = a.fit, lease = fit?.lease;
     if (!fit || !lease || (owner && owner !== lease.owner)) return;
@@ -150,8 +155,9 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       else resumeWaiting(pane, a);
       if (fit.lease) return;
       for (const member of a.clients) {
-        if (!fit.slot && !fit.blocked.has(member) && connectionOf(member).mode === "interact")
-          send(member, { type: "input-ready", pane_id: pane });
+        if (connectionOf(member).mode !== "interact") continue;
+        if (fit.slot === "uncertain") fitInputUnavailable(member, pane);
+        else if (!fit.slot && !fit.blocked.has(member)) send(member, { type: "input-ready", pane_id: pane });
       }
     };
     if (lease.session) {
@@ -195,9 +201,12 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       }
       return;
     }
+    clearTimeout(a.retry);
+    a.retry = undefined;
     // Taking our own slot needs no --takeover after release. If a third party gets it
     // in the gap, that is a different holder, not the one the user asked to displace.
-    const takeExternal = takeover && !fit.lease && fit.slot === "held" && fit.blocked.get(owner) === "external";
+    const knownExternal = fit.blocked.get(owner) === "external";
+    const takeExternal = takeover && !fit.lease && fit.slot === "held" && knownExternal;
     if (fit.blocked.has(owner)) fit.blocked.set(owner, "retrying");
     if (fit.lease) {
       fitHeld(a, fit.lease.owner, pane, "local");
@@ -210,19 +219,29 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       && owner.data.attached.get(pane) === claim && !claim.keepSize && !connectionOf(owner).closing && connectionOf(owner).mode === "interact";
     for (const member of a.clients) {
       holdPending(member, pane);
-      send(member, { type: "input-ready", pane_id: pane, ready: false });
+      if (connectionOf(member).mode !== "interact") continue;
+      if (member === owner) send(member, { type: "input-ready", pane_id: pane, ready: false });
+      // Revoke input without marking another viewer's independently usable screen stale.
+      else if (!fit.slot && !fit.blocked.has(member)) send(member, { type: "error", code: "input_not_ready", pane_id: pane,
+        message: "Another viewer is opening this Windows terminal for input." });
     }
     const failed = (held: boolean) => {
       if (!valid()) return;
       fit.slot = held ? "held" : "uncertain";
-      if (held) fitHeld(a, owner, pane, "external");
-      else if (!retryFailure && !lease.granted) {
-        send(owner, { type: "error", code: "attach_failed", pane_id: pane, message: "The Windows terminal control session ended." });
+      if (held) {
+        if (knownExternal && !lease.granted) fit.blocked.set(owner, "external");
+        else fitHeld(a, owner, pane, "external");
       }
       retireFit(pane, a, owner, () => {
         // A lost stream doesn't prove contention or a free slot. Probe once with
         // the still-current claim, never replay a takeover or bypass it with RPC.
-        if (held) return;
+        if (held) {
+          a.retry = setTimeout(() => {
+            a.retry = undefined;
+            resumeWaiting(pane, a);
+          }, heldRetry);
+          return;
+        }
         if ((retryFailure || lease.granted) && owner.data.attached.get(pane) === claim)
           fitPane(pane, a, owner, false, false);
         if (!fit.lease) resumeWaiting(pane, a);
@@ -588,6 +607,9 @@ export function createTerminalRegistry({ options, clients, stopped, terminalAtta
       if (attachment.ready && !attachment.held && (!fitting || (fitting.owner === client && fitting.granted))
         && !(attachment.kind === "mirror" && (attachment.fit?.retiring || attachment.fit?.slot || attachment.fit?.blocked.has(client))))
         send(client, { type: "input-ready", pane_id: message.pane_id });
+      else if (attachment.kind === "mirror" && attachment.fit?.slot === "uncertain" && !fitting
+        && !attachment.fit.retiring && connectionOf(client).mode === "interact")
+        fitInputUnavailable(client, message.pane_id);
       if (!alreadyAttached) attached(client, message.pane_id);
       if (attachment.kind === "mirror") return;
       if (drives) drivePty(message.pane_id, client, geometry.cols, geometry.rows);

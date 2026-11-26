@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mirrorFrame } from "../mirror.ts";
-import { connectionData, type Client } from "./connections.ts";
+import { connectionData, connectionOf, type Client } from "./connections.ts";
 import { createTerminalRegistry } from "./terminals.ts";
 
 type Frame = Record<string, unknown> & { type: string };
@@ -97,6 +97,85 @@ function registryFor(clients: Client[], nativeControl?: (socket: string) => Prom
 }
 
 const attach = { type: "attach", pane_id: "p", cols: 80, rows: 24, flow_control: "ack" } as const;
+
+it.skipIf(process.platform === "win32")("explains why a fixed-size viewer cannot type after an uncertain controller exit", async () => {
+  const command = join(root, "lost-control");
+  writeFileSync(command, `#!${process.execPath}
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+for await (const _ of console) process.exit(1);
+`, { mode: 0o700 });
+  const notices: Frame[] = [];
+  const owner = recorder(), fixed = recorder(frame => { if (frame.type === "error") notices.push(frame); });
+  let leaving = false;
+  const registry = registryFor([owner.client, fixed.client], async () => command, client => {
+    if (client !== owner.client || !leaving) return;
+    leaving = false;
+    queueMicrotask(() => registry.terminalFrames.detach(owner.client, { type: "detach", pane_id: "p" }));
+  });
+  try {
+    await registry.terminalFrames.attach(owner.client, { ...attach, windows_fit: true });
+    await owner.until(1);
+    (await nextRead())("retired screen");
+    await registry.terminalFrames.attach(fixed.client, { ...attach, keep_size: true });
+    await fixed.until(1);
+    leaving = true;
+    expect(registry.sight(owner.client, "p").write("end control")).toBe(true);
+    (await nextRead())("fixed mirror still live");
+    expect((await fixed.until(2))[1]?.data).toContain("fixed mirror still live");
+    expect(registry.sight(fixed.client, "p").write("not safe to send")).toBe(false);
+    expect(notices).toEqual([expect.objectContaining({ code: "input_not_ready", pane_id: "p" })]);
+  } finally { registry.closeAttachment("p"); }
+});
+
+it.skipIf(process.platform === "win32")("keeps a legacy observer's screen ready when a Windows controller joins", async () => {
+  const command = join(root, "observe-control");
+  writeFileSync(command, `#!${process.execPath}
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"Y29udHJvbGxlZCBzY3JlZW4="}));
+for await (const _ of console) {}
+`, { mode: 0o700 });
+  const readiness: Frame[] = [];
+  const viewer = recorder(frame => { if (frame.type === "input-ready") readiness.push(frame); });
+  connectionOf(viewer.client).mode = "observe";
+  const owner = recorder();
+  const registry = registryFor([viewer.client, owner.client], async () => command);
+  try {
+    await registry.terminalFrames.attach(viewer.client, attach);
+    (await nextRead())("fixed screen");
+    await viewer.until(1);
+    await registry.terminalFrames.attach(owner.client, { ...attach, windows_fit: true });
+    expect((await viewer.until(2))[1]?.data).toBe("controlled screen");
+    expect(readiness).toEqual([{ type: "input-ready", pane_id: "p" }]);
+    expect(registry.sight(viewer.client, "p").write("observer input")).toBe(false);
+  } finally { registry.closeAttachment("p"); }
+});
+
+it.skipIf(process.platform === "win32")("claims Windows fit after an external holder leaves without another action or takeover", async () => {
+  const command = join(root, "external-control");
+  writeFileSync(command, `#!${process.execPath}
+import { existsSync, writeFileSync } from "node:fs";
+const attempted = import.meta.path + ".attempted";
+if (process.argv.includes("--takeover")) process.exit(2);
+if (!existsSync(attempted)) {
+  writeFileSync(attempted, "");
+  console.log(JSON.stringify({type:"terminal.closed",reason:"already has an attached client"}));
+  process.exit(0);
+}
+console.log(JSON.stringify({type:"terminal.frame",full:true,width:80,height:24,encoding:"ansi",bytes:"QQ=="}));
+for await (const _ of console) {}
+`, { mode: 0o700 });
+  const status: string[] = [];
+  const viewer = recorder(frame => {
+    if (frame.code === "attach_held") status.push("held");
+    if (frame.type === "attach-resumed") status.push("resumed");
+  });
+  const registry = registryFor([viewer.client], async () => command);
+  try {
+    await registry.terminalFrames.attach(viewer.client, { ...attach, windows_fit: true });
+    await viewer.until(1);
+    expect(viewer.grids.at(-1)).toMatchObject({ fixed: false, windows_fit: true });
+    expect(status).toEqual(["held", "resumed"]);
+  } finally { registry.closeAttachment("p"); }
+});
 
 it.skipIf(process.platform === "win32")("gives a late passive viewer a full fixed mirror when the controller's replay lost the screen", async () => {
   const command = join(root, "large-control");
