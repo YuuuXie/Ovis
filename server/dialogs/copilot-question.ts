@@ -1,9 +1,15 @@
-import { ANSI_RE, KEY, SOLID_RULE_RE, finishPrompt, keySteps, navigationKeys, type ParsedPrompt } from "./shared.ts";
+import { ANSI_RE, SOLID_RULE_RE, finishPrompt, type DialogReader, type ParsedPrompt } from "./shared.ts";
 
 const hint = "↑/↓ select · enter accept · ctrl+d decline · esc cancel";
 const other = "Other (type your answer)";
 const editing = "Other (type your answer below)";
 export const copilotPlaceholder = "Type your answer...";
+
+export const readers: readonly DialogReader[] = [{
+  id: "copilot-question", agents: ["copilot"], priority: 20, reread: "each-move", list: "none",
+  // Like Pi's questionnaire, only readKnownPrompt can supply a verified pending call.
+  parse: () => null,
+}];
 
 /** Match the whole live single-choice panel, not the same question quoted in a turn above the composer. */
 export function copilotQuestion(screen: string, call: string): ParsedPrompt | null {
@@ -34,6 +40,5 @@ export function copilotQuestion(screen: string, call: string): ParsedPrompt | nu
   }, {
     responder: "copilot-question", menuLabels: labels, selectedIndex: rows.findIndex(row => row?.[1] === "❯ "),
     checkedOptionIndices: [], customMenuIndex: custom ? choices.length : null, rejectWithEscapeIndex: null, copilotDraft: draft,
-    customSteps: text => [...keySteps(navigationKeys(choices.length - rows.findIndex(row => row?.[1] === "❯ "))), { text }, ...keySteps([KEY.enter])],
   }, { call });
 }

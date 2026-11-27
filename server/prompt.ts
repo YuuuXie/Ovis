@@ -505,6 +505,9 @@ export function parseInteractivePrompt(agent: string, screen: string, omoAsk: Om
 
 class InvalidAnswer extends Error {}
 
+const singleLineInlineEditor = (responder: ParsedPrompt["responder"]): boolean =>
+  responder === "pi-ask-question" || responder === "pi-questionnaire-question" || responder === "copilot-question";
+
 export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer, "option_index" | "option_indices" | "custom_text">): AnswerStep[] {
   const parsed = parsedByPublicPrompt.get(prompt);
   if (!parsed) throw new InvalidAnswer("The prompt was not produced by parseInteractivePrompt.");
@@ -515,13 +518,13 @@ export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer,
 
   if (answer.custom_text !== undefined) {
     if (typeof answer.custom_text !== "string") throw new InvalidAnswer("Custom text must be a string.");
-    if (parsed.responder === "copilot-question" && (/[\u0000-\u001f\u007f-\u009f]/.test(answer.custom_text) || answer.custom_text.trim() === copilotPlaceholder)) {
+    if (parsed.responder === "copilot-question" && answer.custom_text.trim() === copilotPlaceholder) {
       throw new InvalidAnswer("Use a single line of plain text for this Copilot question.");
     }
     // A raw newline/control in rpiv's inline input can submit it and type into the next
     // question, review, or composer. Validate before trimming and before any navigation.
-    if ((parsed.responder === "pi-ask-question" || parsed.responder === "pi-questionnaire-question") && /[\u0000-\u001f\u007f-\u009f]/.test(answer.custom_text)) {
-      throw new InvalidAnswer("Pi custom answers must be one line without control characters.");
+    if (singleLineInlineEditor(parsed.responder) && /[\u0000-\u001f\u007f-\u009f]/.test(answer.custom_text)) {
+      throw new InvalidAnswer("Custom answers must be one line without control characters.");
     }
     // dsh-tui reads a control byte inside the typed run as its key (measured on 0.20.0): ESC [B moves to an option the
     // answer then carries, Ctrl+C or a lone ESC cancels the question
@@ -564,7 +567,7 @@ export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer,
     // dialog is the same but for a worse reason: its `>` line already owns the input, so an
     // enter typed before the answer submits the dialog empty and leaves the answer behind to
     // be typed into the agent's own prompt.
-    if (!["claude-question", "claude-plan", "codex-question", "codex-async-question", "pi-input"].includes(parsed.responder)) navigation.push(KEY.enter);
+    if (!["claude-question", "claude-plan", "codex-question", "codex-async-question", "copilot-question", "pi-input"].includes(parsed.responder)) navigation.push(KEY.enter);
     if (parsed.responder === "codex-question") navigation.push(KEY.tab);
     // what was typed into pi's line in the terminal would stay around the answer: the line is
     // emptied first, after the cursor and before it (pi's editor keys, measured on 0.87.1)
@@ -2339,8 +2342,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         const responder = parsed.responder;
         const reader = registry.readerFor(responder);
         const interaction = body.custom_text === undefined ? reader?.interaction?.(parsed) : undefined;
-        const checkBeforeText = responder === "copilot-question" || responder === "fallback-gjc-menu" || responder === "pi-ask-question"
-          || responder === "pi-questionnaire-question" || responder === "agy-question";
+        const checkBeforeText = singleLineInlineEditor(responder) || responder === "fallback-gjc-menu" || responder === "agy-question";
         const codexTyped = responder === "codex-question" || responder === "codex-async-question";
         const editorAnswer = body.custom_text !== undefined && (checkBeforeText || responder === "dsh-question" || codexTyped
           || responder === "claude-question" || responder === "omp-question" || responder === "omo-question" || responder === "omo-review" || responder === "hermes-question"
@@ -2351,7 +2353,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // Claude's unnumbered rows and pi's models are read with no number to aim at: looked at
         // again before the Enter even when it needs no move. So is Claude's model list, picked
         // with a letter: typed after the list has gone, it would stand in the agent's own prompt
-        let moved = responder === "copilot-question" || (reader !== undefined && reader.reread !== "none");
+        let moved = reader !== undefined && reader.reread !== "none";
         // Claude's and Codex's model lists: a window on a list, picked with a letter; Claude's effort
         // slider the same way, its levels side by side
         const list = reader !== undefined && reader.list !== "none";
@@ -2535,7 +2537,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         let lettaSearch = parsed.lettaSearch ?? "";
         const customEditorReady = async (draft: string): Promise<boolean> => {
           const deadline = Date.now() + SETTLE_MS;
-          if (responder === "copilot-question" || responder === "pi-ask-question" || responder === "pi-questionnaire-question") {
+          if (singleLineInlineEditor(responder)) {
             while (asks() && !request.signal.aborted && Date.now() < deadline) {
               const reading = readKnownPrompt(body.pane_id, pane, agent, options.codexHome, panes, options.openCodeStateDir);
               const read = await Promise.race([reading, Bun.sleep(Math.max(0, deadline - Date.now())).then(() => null)]);
@@ -2636,7 +2638,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             if (editorAnswer && customTyped && (responder === "dsh-question" || checkBeforeText) && !(await customEditorReady(editorAnswer.text))) return promptChanged();
             if (responder === "letta-model" && body.custom_text !== undefined && committed && !(await customEditorReady(lettaSearch))) return promptChanged();
             // GJC's selector can close under the answer: its composer must not take the moves.
-            if (move && walked && (list || reader?.reread === "each-move" || responder === "copilot-question" || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
+            if (move && walked && (list || reader?.reread === "each-move" || responder === "fallback-gjc-menu") && !(await onRow())) return promptChanged();
             if (!move && (!committed || togglesInPlace())) {
               if ((moved || (togglesInPlace() && committed)) && !(await onRow())) return promptChanged();
               if (request.signal.aborted) return promptChanged();
