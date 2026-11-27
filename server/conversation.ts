@@ -184,7 +184,7 @@ function copilotPrefix(paneId: string, identity: string, path: string): string {
   return prefix;
 }
 
-function copilotHistoryIdentity(path: string): string {
+export function copilotHistoryIdentity(path: string): string {
   try {
     const fd = openCopilotFile(path);
     try {
