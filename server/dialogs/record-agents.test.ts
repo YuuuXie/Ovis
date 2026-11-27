@@ -33,7 +33,7 @@ test("only the unambiguous root Copilot question remains answerable", () => {
   const fields = { pick: { type: "string", enum: ["Alpha", "Beta"] } };
   const start = (id: string, properties: object = fields, agent?: string) => JSON.stringify({
     type: "tool.execution_start", agentId: agent, data: { toolName: "ask_user", toolCallId: id,
-      arguments: { message: "Choose", requestedSchema: { type: "object", properties } } },
+      arguments: { message: " Choose ", requestedSchema: { type: "object", properties } } },
   });
   const read = (...lines: string[]) => copilotAskRecord.pending(lines.join("\n"));
   const root = start("root");

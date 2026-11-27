@@ -88,7 +88,7 @@ test.each([false, true])("answers a Copilot option only while the same ask_user 
   } finally { calls.mockRestore(); }
 });
 
-test.each(["cursor", "completion", "foreground"] as const)("rejects a Copilot %s change during the last screen read before Enter", async change => {
+test.each(["cursor", "completion", "foreground", "post-lookup-cursor"] as const)("rejects a Copilot %s change during the last screen read before Enter", async change => {
   const screen = recorded("copilot-1.0.109-ask-32s");
   let open = true;
   let binding = "first";
@@ -100,7 +100,7 @@ test.each(["cursor", "completion", "foreground"] as const)("rejects a Copilot %s
       let reads = 0;
       const beforeKey = async () => {
         pane.onRead = () => {
-          if (++reads !== 3) return;
+          if (++reads !== (change === "post-lookup-cursor" ? 4 : 3)) return;
           if (change === "completion") open = false;
           else if (change === "foreground") binding = "second";
           else pane.screen = screen.replace(" ❯ red", "   red").replace("   blue", " ❯ blue");

@@ -47,7 +47,7 @@ export const copilotAskRecord: AgentRecord = {
           : args?.requestedSchema === undefined ? args?.choices : null;
         const question = args?.message ?? args?.question;
         calls.open(data.toolCallId, typeof question === "string" && Array.isArray(choices) && choices.length && choices.every(choice => typeof choice === "string")
-          ? JSON.stringify([question, choices]) : null);
+          ? JSON.stringify([question.trim(), choices]) : null);
       } else if (entry.type === "tool.execution_complete" || entry.type === "human_response.recorded") calls.close(data?.toolCallId);
       else if (entry.type === "user.message" || entry.type === "session.abort" || entry.type === "session.resume") calls.clear();
     }

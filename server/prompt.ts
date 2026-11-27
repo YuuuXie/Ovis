@@ -1867,10 +1867,14 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           || Date.now() > readUntil || !same(shown, screen ?? "", settled)) throw new KeyRefused();
         if (shown?.copilotAsk) {
           // A foreground switch can leave both the old file and the drawn question unchanged.
-          const current = await Promise.race([recordRequest(body.pane_id, "copilot-question"),
-            Bun.sleep(Math.max(0, readUntil - Date.now())).then(() => null)]);
+          const signal = AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(0, readUntil - Date.now()))]);
+          const current = await untilAborted(recordRequest(body.pane_id, "copilot-question"), signal);
           if (current?.id !== shown.copilotAsk.id || !shown.copilotAsk.unchanged?.()
             || request.signal.aborted || Date.now() > readUntil) throw new KeyRefused();
+          const frame = await untilAborted(liveScreen(body.pane_id), signal);
+          const final = frame === undefined ? null : copilotQuestion(frame, current.id);
+          if (!final || final.id !== shown.id || final.selectedIndex !== shown.selectedIndex
+            || final.copilotDraft !== shown.copilotDraft || signal.aborted || !current.unchanged?.()) throw new KeyRefused();
         }
         // a card showing its record's command goes to that request only: after the screen's last read, the record must
         // still hold it open, so another request that opened meanwhile with the same command takes none of its keys
