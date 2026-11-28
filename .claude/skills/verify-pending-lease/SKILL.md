@@ -21,6 +21,7 @@ checker.
 | Rule | What it says | What a break does |
 | --- | --- | --- |
 | `NoTypingAfterLeaseLoss` | Nothing of a message is pasted or entered after the connection it waits on left the pane, closed, switched to watching or lost the terminal's attach, also when that connection has come back since. For a first message, the attach restarting ends the send under way, not the message's turn: its page may type it at a later try. | The message is typed with nobody there who asked for it. |
+| `ConfirmationHonored` | When a connected socket write asks for asynchronous confirmation, it must receive a positive answer before writing. A positive answer does not replace the live synchronous lease check. | A refused request still reaches the terminal. |
 | `FirstMessageOnlyByItsPage` | A first message is typed on its own only through the page that sent the create request, and never once that page has left the pane, closed or switched to watching since the request came, also while the workspace was made and the agent launched. | Another device, or a page that returned, types it unasked. |
 | `TypedAtMostOnce` | A message is pasted once and gets one Enter of its own, whatever fails in between. One that went to the agent as data (an ACP prompt, Codex's `turn/steer` or `turn/start`) has had both: it is never typed as well, also when no answer to it came. (The keys a Send now presses after that Enter, Codex's Escape, agy's alt+m and Grok's second Enter, are not counted.) | The agent gets the message twice, or a half-typed message is typed again behind itself. |
 | `FirstMessageHeldOncePageLeft` | A first message whose page left is held, not left waiting. | The pane's other queued messages wait behind it for ever. |
@@ -44,8 +45,8 @@ skill (`/pstack:statechart` in Claude Code): give it `PendingLease.tla`, the con
 installs TLC and Java itself when `mise` is on the PATH. On this PC give it a `TMPDIR` under
 `~/.cache/ovis-tmp/`, as AGENTS.md says of `/tmp`.
 
-A run that is back where it should be says that the six rules above and `NoDeadlock` hold, over
-4,709,805 states, in one to three minutes on 8 workers. The model has more states than `/statechart` draws, so a
+A run that is back where it should be says that the seven rules above and `NoDeadlock` hold.
+TLC exhausted 8,447,570 distinct states (depth 32) on 8 workers. The model has more states than `/statechart` draws, so a
 passing run has no chart. A rule that breaks comes with its shortest path, in plain words, and a
 chart of that path.
 
@@ -69,6 +70,8 @@ breaking means the model no longer checks that rule.
 | `broken-type-unanswered-data.cfg` | a message that went as data and got no answer is typed instead, as one that reached nothing is | `TypedAtMostOnce` |
 | `broken-drain-before-turn-end.cfg` | `next` gives out a message though a turn's end the agent tells is still awaited | `QueueWaitsForToldTurnEnd` |
 | `broken-no-wait-for-turn.cfg` | the queue does not go behind the turn its message became (no `pending.awaitTurn`) | `QueueWaitsForToldTurnEnd` |
+| `broken-stale-write-guard.cfg` | the sender is authorized before `await confirm()`, detaches during the lookup, and the socket writes on the old authorization | `NoTypingAfterLeaseLoss` |
+| `broken-ignore-confirmation.cfg` | the lease is valid but `confirm()` returns false and the socket writes anyway | `ConfirmationHonored` |
 
 Each of these configs names its rule alone, because `/statechart` checks the other rules after a
 break only up to a bound.
@@ -101,7 +104,7 @@ and every `broken-*` config again.
    pane or the right to type from a connection also calls `Lose`, which is what the rules are
    stated on. A new way to type a pending message goes through `Write`.
 2. Run `PendingLease.cfg`. A break here is your change, or your edit of the model: see above.
-3. Run the nine `broken-*` configs. Each must break its rule. A new rule gets a `Break…` constant
+3. Run all eleven `broken-*` configs. Each must break its rule. A new rule gets a `Break…` constant
    and a config of its own.
 4. Update the coverage record, then run `.claude/skills/verify-pending-lease/covered.sh --record`
    and `bun scripts/verify-pending-lease.ts --record`, and commit `covered.blobs` and `pins.json`
@@ -137,7 +140,17 @@ tests (`server/core/pending-left-lease.test.ts`, and one at the create route in
   and retries are not bounded.
 - **One step.** Code between two `await`s on I/O is one step. A chain of `await`s on values that
   are already settled counts as one step too: no frame, timer or herdr reply runs inside it. A
-  herdr write and the guard asked right before it are one step (`herdrRpc`'s `guard`).
+  herdr write and the synchronous guard asked right before it are one step (`herdrRpc`'s `guard`).
+  `BeginConfirmation` is a separate step on the connected path with an optional `await confirm()`;
+  attachment, connection and authority changes can interleave there. The result and the **current**
+  lease must both allow the write. A timeout or close during the await ends the attempt; a late
+  completion cannot write (`settled`). An overlapping drain cannot start a second check (`writing`).
+- **Socket boundary.** Pending sends currently supply the synchronous guard only. The model also
+  permits optional confirmation before any paste, Enter or follow-up key, as supported by those
+  same wrappers. A complete newline-terminated frame is one modeled write; a partial frame cannot
+  be acted on. Every drain repeats the same checks. A cut-short frame may leave delivery uncertain.
+  The model does not simulate byte offsets or the agent's editor. The backpressure and zero-byte
+  refusal cases run on real fixture sockets in `server/herdr/rpc-write.test.ts`.
 - **Identities.** The code compares objects (the attachment, its process, the authority). The
   model keeps the answer of each comparison on the lease (`a`, `p`, `k`), which is the same thing
   and needs no bound on how many objects are made.
@@ -201,6 +214,7 @@ against it. A squash merge keeps blob ids, so the record stays right on `main`.
 | `DrainPick`, `DrainSkips`, `DrainClaim`, `DrainClaimNoLease`, `Typist`, `NextUp`, `CanClaim` | `pending.ts` `drainPending`, `typists`, `dispatchPending`; `pending-input.ts` `next` (with `turns`, the model's `turnWait`), `claim` |
 | `RefusedForNow`, `RefusedForGood`, `RefusedHoldPane`, `LeaseFailed`, `FailedAfterPaste` | `pending.ts` `pendingContext`, `dispatchPendingText` (including `refusedFirstWrite`, Codex `unannounced` own-screen `holdPane`, and Codex app-server `"changed"` `holdPane`) and its `catch` |
 | `Paste`, `SubmitAsData`, `Enter`, `LaterKey` | `dispatchPendingText`: `paneSendText` and `paneSendKeys` with the guard `allowed`, ACP `child.client.submit`, Codex `steerTarget.send` `writing` and `sendCodexTextAsData` `mayWrite` (turn/start for a Codex at rest) after `authorizePending`; the guarded writes of `server/core/composer.ts` `freeClaudeBox` and `server/opencode-skill-attach.ts` `typeWithSkills`; `server/herdr/client.ts` `herdrRpc` `writeRequest` |
+| `BeginConfirmation`, `CancelConfirmation`, `SocketWrite` | `herdrRpc.writeRequest`: single in-flight check on connect/drain; await optional `confirm`, reject a settled attempt, then require confirmation and the synchronous `guard` before `socket.write`. The direct branch has no confirmation await. |
 | `DataUnsent`, `DataBusy`, `DataUnanswered`, `SentAsTurn`, `TurnOver` | the answers of `server/approvals/codex.ts` `Connection.startTurn` (`unsent`, a `running` turn, `unknown`, a `started` turn) and `steer` (`unsent`, `unknown`), as `server/command-data-send.ts` `sendCodexTextAsData` and `dispatchPendingText` take them: typed as before, `pending_wait` behind the turn for an automatic or queued send, `submit_changed`, sent; `pending.ts` `behindCodexTurn` (`pending.awaitTurn`, and `pending.turnOver` then `drainPending` once the turn's `over` settles); `pending-input.ts` `awaitTurn`, `turnOver`, `waiting` |
 | `Settle`, `Unattended`, `LeaseFailRetries`, `Sent`, `SentUnconfirmed` | `pending.ts` `dispatchPending`, `FIRST_MESSAGE_RETRY_CODES`, `keepTurnGate` (a Codex Send now on the terminal that `interruptCodexSteering` calls `"unconfirmed"`); `pending-input.ts` `settle` (with `"preserve-turn"`: the state `review`, `reviewOnly`, which `blocksQueue` lets the queue pass) |
 | the lane (`lane`, `req`) | `server/core/input.ts` `serialize` |

@@ -56,7 +56,7 @@ it.each(["x", "🙂"])("delivers one complete large %s frame across real socket 
   } finally { await fixture.close(); }
 });
 
-it("waits for a connected guard and sends no bytes if authority changed", async () => {
+it.each(["confirmation refused", "lease revoked"] as const)("sends no bytes after the connected lookup: %s", async reason => {
   const accepted = Promise.withResolvers<void>();
   const ended = Promise.withResolvers<void>();
   let received = 0;
@@ -66,8 +66,13 @@ it("waits for a connected guard and sends no bytes if authority changed", async 
     accepted.resolve();
   });
   try {
-    const guard = async () => { await accepted.promise; return false; };
-    const error = await herdrRpc("fixture.write", {}, fixture.path, 2_000, undefined, guard).catch((e: unknown) => e);
+    let allowed = true;
+    const confirm = async () => {
+      await accepted.promise;
+      allowed = reason !== "lease revoked";
+      return reason !== "confirmation refused";
+    };
+    const error = await herdrRpc("fixture.write", {}, fixture.path, 2_000, () => allowed, confirm).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(HerdrError);
     expect((error as HerdrError).code).toBe("cancelled");
     await ended.promise;
@@ -75,7 +80,25 @@ it("waits for a connected guard and sends no bytes if authority changed", async 
   } finally { await fixture.close(); }
 });
 
-it("cuts a request short, never completing it, when the sender loses the right to send mid-request", async () => {
+it("discards a late confirmation after the connected peer closed", async () => {
+  const checking = Promise.withResolvers<void>();
+  const result = Promise.withResolvers<boolean>();
+  const fixture = await peer(socket => { void checking.promise.then(() => socket.end()); });
+  try {
+    let guardCalls = 0;
+    const error = await herdrRpc("fixture.write", {}, fixture.path, 2_000, () => { guardCalls++; return true; }, () => {
+      checking.resolve();
+      return result.promise;
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HerdrError);
+    expect((error as HerdrError).code).toBe("closed");
+    result.resolve(true);
+    await result.promise;
+    expect(guardCalls).toBe(0);
+  } finally { result.resolve(false); await fixture.close(); }
+});
+
+it.each(["guard", "confirm"] as const)("cuts a request short if the %s refuses on a socket drain", async boundary => {
   const frame = 8 * 1024 * 1024;
   const chunks: Buffer[] = [];
   const started = Promise.withResolvers<void>();
@@ -89,13 +112,14 @@ it("cuts a request short, never completing it, when the sender loses the right t
   try {
     let allowed = true;
     let asks = 0;
-    const guard = () => {
+    const permit = () => {
       asks++;
       const answer = allowed;
       if (asks === 1) { allowed = false; started.resolve(); }
       return answer;
     };
-    const error = await herdrRpc("fixture.write", { text: "y".repeat(frame) }, fixture.path, 2_000, guard).catch((e: unknown) => e);
+    const error = await herdrRpc("fixture.write", { text: "y".repeat(frame) }, fixture.path, 2_000,
+      boundary === "guard" ? permit : () => true, boundary === "confirm" ? async () => permit() : undefined).catch((e: unknown) => e);
     await ended.promise;
     const received = Buffer.concat(chunks);
     expect(error).toBeInstanceOf(HerdrError);

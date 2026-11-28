@@ -10,4 +10,4 @@ a7ec7d7e68d95ec6fedb47ecd5acfff0ba74f505 server/core/input.ts
 cabff8458560da27d14ef5f2018c251f40eca54d server/core/composer.ts
 be2220ce2bd7b07d0e6da288a4a324656d50fdbd server/opencode-skill-attach.ts
 790d262d12fa16a77723839857f1bee743bf9add server/workspace-routes.ts
-342e5338fece0f14a60fe8c5c220770659e277a9 server/herdr/client.ts
+d94345b1b1cb14c70fb69cb0a178a6b20244b50a server/herdr/client.ts

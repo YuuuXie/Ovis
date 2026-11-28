@@ -49,14 +49,23 @@ describe("verify-pending-lease enforcement", () => {
     expect(extractConnectionsLeaseSlice(connections.replace("if (state.revoked) throw new HerdrError", "if (false) throw new HerdrError")))
       .not.toBe(extractConnectionsLeaseSlice(connections));
 
-    const herdrClient = read("server/herdr/client.ts");
-    expect(extractHerdrClientWriteSlice(herdrClient.replace("if (guard && !guard()) {", "if (false) {")))
-      .not.toBe(extractHerdrClientWriteSlice(herdrClient));
-    // paneSendText no longer handing herdrRpc its guard
-    const unguarded = herdrClient.replace("await herdrRpc(\"pane.send_text\", { pane_id: paneId, text }, socketPath, undefined, guard);",
-      "await herdrRpc(\"pane.send_text\", { pane_id: paneId, text }, socketPath);");
-    expect(unguarded).not.toBe(herdrClient);
-    expect(extractHerdrClientWriteSlice(unguarded)).not.toBe(extractHerdrClientWriteSlice(herdrClient));
+    const client = read("server/herdr/client.ts");
+    const slice = extractHerdrClientWriteSlice(client);
+    const confirm = "const confirmed = confirm ? await confirm() : true;";
+    const writeGuard = "if (!confirmed || (guard && !guard()))";
+    const mutations = [
+      client.replace(writeGuard, "if (!confirmed)"),
+      client.replace(writeGuard, "if (guard && !guard())"),
+      client.replace(confirm, `const allowed = !guard || guard();\n${confirm}`).replace(writeGuard, "if (!confirmed || !allowed)"),
+      client.replace(`${confirm}\n          if (settled) return;`, confirm),
+      client.replace("if (writing || settled || socket === null", "if (settled || socket === null"),
+      ...["text", "keys"].map(field => client.replace(`{ pane_id: paneId, ${field} }, socketPath, undefined, guard, confirm)`,
+        `{ pane_id: paneId, ${field} }, socketPath, undefined, undefined, confirm)`)),
+    ];
+    for (const mutated of mutations) {
+      expect(mutated).not.toBe(client);
+      expect(extractHerdrClientWriteSlice(mutated)).not.toBe(slice);
+    }
 
     // turn/start no longer asking its guard right before the request
     const codex = read("server/approvals/codex.ts");
@@ -148,7 +157,7 @@ describe("verify-pending-lease enforcement", () => {
     const nextBlock = tla.slice(tla.indexOf("Next =="), tla.indexOf("Spec ==")).replace(/\\\*.*$/gm, "");
     const actions = [...nextBlock.matchAll(/(?<!\\)\b([A-Z][A-Za-z0-9]*)\b/g)]
       .map((m) => m[1]!)
-      .filter((name) => !["Next", "Clients", "Msgs", "Over"].includes(name));
+      .filter((name) => !["Next", "Clients", "Msgs", "BOOLEAN", "Over"].includes(name));
     const cases = new Set([...view.matchAll(/\bcase\s+"([A-Za-z0-9]+)"\s*:/g)].map((m) => m[1]!));
     expect(actions.filter((action) => !cases.has(action))).toEqual([]);
 

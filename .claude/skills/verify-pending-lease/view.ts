@@ -16,6 +16,7 @@ export function state(v: Vars): string {
   if (v.st.Q !== "none") parts.push(`A's message ${row("Q")}`);
   if (v.st.F !== "none") parts.push(`${pageName(v.page)}'s first message ${row("F")}`);
   if (v.typedAfterLoss) parts.push("typed after its page left");
+  if (v.wroteUnconfirmed) parts.push("typed despite a refused confirmation");
   if (v.firstWithoutPage) parts.push("first message typed without its page");
   if (["asked", "queued"].includes(v.st.F) && !v.pageOk) parts.push("its page has left since it asked");
   if (v.pastes.Q > 1 || v.pastes.F > 1 || v.enters.Q > 1 || v.enters.F > 1) parts.push("typed twice");
@@ -64,6 +65,8 @@ export function step(action: string, from: Vars, to: Vars): string | null {
     case "RefusedForGood": return `the send of ${what} is refused`;
     case "RefusedHoldPane": return `the send of ${what} is refused, and the pane's messages are held`;
     case "LeaseFailed": return `the send of ${what} stops: its page may no longer type`;
+    case "BeginConfirmation": return `the connected socket waits for confirmation to write ${what}`;
+    case "CancelConfirmation": return `the write of ${what} stops without completing the request`;
     case "Paste": return `${what} is pasted into the terminal`;
     case "DataUnsent": return `the agent's own server takes nothing of ${what}: it is typed as before`;
     case "SubmitAsData": return `${what} is sent as data`;

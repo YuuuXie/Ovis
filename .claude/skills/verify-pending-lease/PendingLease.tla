@@ -14,6 +14,8 @@ CONSTANTS
   Clients,       \* the connections (Client objects); a reconnect is another one
   Sender,        \* the connection that sends Q
   \* Broken variants. All FALSE is the code as it is.
+  BreakStaleWriteGuard,     \* reuse authorization checked before the optional confirmation await
+  BreakIgnoreConfirmation,  \* write even though the connected confirmation refused
   BreakKeepAuthority,     \* holdPending keeps the authority
   BreakRetryAfterTyping,  \* a send that failed after its paste is queued again
   BreakKeepRequester,     \* holdRequested keeps the page as the first message's typist
@@ -56,12 +58,12 @@ VARIABLES
   laneIntact, \* who types in the lane has not left since the send was asked for
   reqIntact,  \* who sent the waiting frame has not left since
   pastes, enters,
-  typedAfterLoss, firstWithoutPage,
+  typedAfterLoss, firstWithoutPage, wroteUnconfirmed,
   behindTurn  \* the queue itself wrote while a turn's end was awaited
 
 terminal == <<att, alive, ready, held, members>>
 leases == <<lease, laneLease, reqLease>>
-counts == <<pastes, enters, typedAfterLoss, firstWithoutPage, behindTurn>>
+counts == <<pastes, enters, typedAfterLoss, firstWithoutPage, behindTurn, wroteUnconfirmed>>
 first == <<page, requester, askLeft, askFault>>
 vars == <<terminal, conn, mode, st, fl, leases, order, first, lane, req, turnWait, toldTurn,
           armed, pageOk, laneIntact, reqIntact, counts>>
@@ -161,7 +163,7 @@ Init ==
   /\ lane = NoLane /\ req = NoReq /\ turnWait = FALSE /\ toldTurn = FALSE
   /\ armed = FALSE /\ laneIntact = FALSE /\ reqIntact = FALSE
   /\ pastes = [m \in Msgs |-> 0] /\ enters = [m \in Msgs |-> 0]
-  /\ typedAfterLoss = FALSE /\ firstWithoutPage = FALSE /\ behindTurn = FALSE
+  /\ typedAfterLoss = FALSE /\ firstWithoutPage = FALSE /\ behindTurn = FALSE /\ wroteUnconfirmed = FALSE
 
 ----------------------------------------------------------------------------
 (* The terminal: terminals.ts terminalFrames.attach, detach, closeAttachment; *)
@@ -457,18 +459,46 @@ LeaseFailed ==
 \* what a write is checked against: the sender, or who asked for this send, has not left since
 WriteRight == IF lane.auto /\ lane.m = "Q" THEN armed ELSE laneIntact
 PageRight == lane.auto /\ lane.m = "F" => pageOk /\ lane.by = page
-Write ==
+Write(confirmed) ==
   /\ typedAfterLoss' = (typedAfterLoss \/ ~WriteRight)
+  /\ wroteUnconfirmed' = (wroteUnconfirmed \/ ~confirmed)
   /\ firstWithoutPage' = (firstWithoutPage \/ ~PageRight)
   /\ behindTurn' = (behindTurn \/ (toldTurn /\ (lane.auto \/ lane.direct)))
 Wrote == UNCHANGED <<terminal, conn, mode, st, fl, leases, order, first, req, turnWait, toldTurn, armed, pageOk, laneIntact, reqIntact>>
 
-\* paneSendText with the guard `allowed`: the lease is asked at the write
-Paste ==
-  /\ Typing /\ Authorized(lane.by, laneLease)
+\* The connected writeRequest can optionally yield to confirm(). During that I/O the
+\* pane can be lost, held or reattached. A drain cannot start a second write in this phase.
+ConfirmPhase(pc) == CASE pc = "typing" -> "confirmPaste" [] pc = "pasted" -> "confirmEnter" [] pc = "entered" -> "confirmLater"
+BeginConfirmation ==
+  /\ lane.m # "none" /\ lane.pc \in {"typing", "pasted", "entered"}
+  /\ lane.pc = "entered" => (~lane.auto /\ ~lane.direct /\ ~lane.extra)
+  /\ ~BreakStaleWriteGuard \/ Authorized(lane.by, laneLease)
+  /\ lane' = [lane EXCEPT !.pc = ConfirmPhase(@)]
+  /\ Wrote /\ UNCHANGED counts
+
+\* Refusal/timeout/close during confirmation sends no complete frame. Once settled,
+\* no late confirm result can finish it. A failure after a paste is never retried.
+CancelConfirmation ==
+  /\ lane.m # "none" /\ lane.pc \in {"confirmPaste", "confirmEnter", "confirmLater"}
+  /\ \/ Settle("uncertain")   \* the connection failed after a partial frame
+     \/ /\ lane.pc = "confirmPaste"
+        /\ Settle(IF lane.m = "F" /\ ~Authorized(lane.by, laneLease) /\ LeaseFailRetries(lane.by, laneLease) THEN "retry" ELSE "held")
+  /\ Quiet
+
+\* No confirm: no yield between the synchronous guard and socket.write.
+\* With confirm: its result is not the lease; ask the synchronous guard *after* the await.
+SocketWrite(pc, ok) ==
+  /\ lane.m # "none"
+  /\ \/ /\ lane.pc = pc /\ ok /\ Authorized(lane.by, laneLease)
+     \/ /\ lane.pc = ConfirmPhase(pc)
+        /\ ok \/ BreakIgnoreConfirmation
+        /\ Authorized(lane.by, laneLease) \/ BreakStaleWriteGuard
+
+Paste(ok) ==
+  /\ SocketWrite("typing", ok)
   /\ pastes' = [pastes EXCEPT ![lane.m] = Min(@ + 1, 2)]
   /\ lane' = [lane EXCEPT !.pc = "pasted"]
-  /\ Write /\ Wrote /\ UNCHANGED enters
+  /\ Write(ok) /\ Wrote /\ UNCHANGED enters
 
 \* The agent's data channel is asked before anything is typed, once per send: ACP `child.client.submit`, Codex's
 \* app-server `turn/steer` (`writing`) or `turn/start` (sendCodexTextAsData `mayWrite`). It took nothing (no
@@ -485,7 +515,7 @@ SubmitAsData ==
   /\ pastes' = [pastes EXCEPT ![lane.m] = Min(@ + 1, 2)]
   /\ enters' = [enters EXCEPT ![lane.m] = Min(@ + 1, 2)]
   /\ lane' = [lane EXCEPT !.pc = "entered", !.data = "sent"]
-  /\ Write /\ Wrote
+  /\ Write(TRUE) /\ Wrote
 
 \* Codex's own server says its thread runs a turn, before anything went (Connection.startTurn "running"): the queue's
 \* send goes behind that turn's own end (pending.awaitTurn) and is put off; a queue request that was to be typed at once
@@ -508,18 +538,17 @@ FailedAfterPaste ==
   /\ Settle(IF BreakRetryAfterTyping /\ lane.pc = "pasted" /\ ~lane.direct THEN "retry" ELSE "uncertain") /\ Quiet
 
 \* paneSendKeys Enter with the guard `allowed`
-Enter ==
-  /\ lane.m # "none" /\ lane.pc = "pasted" /\ Authorized(lane.by, laneLease)
+Enter(ok) ==
+  /\ SocketWrite("pasted", ok)
   /\ enters' = [enters EXCEPT ![lane.m] = Min(@ + 1, 2)]
   /\ lane' = [lane EXCEPT !.pc = "entered"]
-  /\ Write /\ Wrote /\ UNCHANGED pastes
+  /\ Write(ok) /\ Wrote /\ UNCHANGED pastes
 
 \* a Send now's later key with the same guard: Codex's Escape (interruptCodexSteering), Grok's second Enter
-LaterKey ==
-  /\ lane.m # "none" /\ lane.pc = "entered" /\ ~lane.auto /\ ~lane.direct /\ ~lane.extra
-  /\ Authorized(lane.by, laneLease)
-  /\ lane' = [lane EXCEPT !.extra = TRUE]
-  /\ Write /\ Wrote /\ UNCHANGED <<pastes, enters>>
+LaterKey(ok) ==
+  /\ SocketWrite("entered", ok) /\ ~lane.auto /\ ~lane.direct /\ ~lane.extra
+  /\ lane' = [lane EXCEPT !.pc = "entered", !.extra = TRUE]
+  /\ Write(ok) /\ Wrote /\ UNCHANGED <<pastes, enters>>
 
 Sent ==
   /\ lane.m # "none" /\ lane.pc = "entered"
@@ -569,7 +598,9 @@ Next ==
   \/ FirstListed \/ RequestRuns \/ AcceptRefused \/ AcceptEnqueue \/ AcceptHeld \/ AcceptTypeNow \/ SteerRefused \/ SteerClaim
   \/ DrainPick \/ DrainSkips \/ DrainClaim \/ DrainClaimNoLease
   \/ RefusedForNow \/ TypeNowWaits \/ RefusedForGood \/ RefusedHoldPane \/ LeaseFailed
-  \/ Paste \/ DataUnsent \/ SubmitAsData \/ DataBusy \/ FailedAfterPaste \/ DataUnanswered \/ Enter \/ LaterKey
+  \/ BeginConfirmation \/ CancelConfirmation
+  \/ \E ok \in BOOLEAN : Paste(ok) \/ Enter(ok) \/ LaterKey(ok)
+  \/ DataUnsent \/ SubmitAsData \/ DataBusy \/ FailedAfterPaste \/ DataUnanswered
   \/ Sent \/ SentAsTurn \/ SentUnconfirmed \/ TurnOver
   \/ Over
 
@@ -580,6 +611,7 @@ Spec == Init /\ [][Next]_vars
 
 \* Nothing of a message is typed after the connection it waits on left the pane, closed, started to watch or lost the attach.
 NoTypingAfterLeaseLoss == ~typedAfterLoss
+ConfirmationHonored == ~wroteUnconfirmed
 \* A first message is typed on its own only through the page that asked for it, and never once that page has left
 \* since its request came.
 FirstMessageOnlyByItsPage == ~firstWithoutPage
