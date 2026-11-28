@@ -8,7 +8,7 @@ import { testConfigHome } from "../scripts/test-herdr.ts";
 import { createServer } from "./index.ts";
 import * as herdrClient from "./herdr/client.ts";
 import { herdrRpc, paneProcessInfo, sessionSnapshot, subscribeEvents, type Subscription, workspaceClose, workspaceCreate } from "./herdr/client.ts";
-import { forgetTranscriptState, paneConversation } from "./conversation.ts";
+import { forgetTranscriptState, paneConversation, paneTranscript } from "./conversation.ts";
 import { copilotHandoffSession, copilotProcessSession } from "./copilot-store.ts";
 import * as omo from "./omo.ts";
 import { readCopilotForeground } from "./copilot-foreground.ts";
@@ -363,6 +363,9 @@ it.skipIf(process.platform !== "linux")("reads the live API without a report, fo
     expect((await sessionSnapshot()).panes.find((p) => p.pane_id === current)?.agent_session).toBeFalsy();
     const initial = await read();
     expect(initial.source).toBe("copilot-transcript");
+    const apiTranscript = await paneTranscript(current);
+    const apiGeneration = apiTranscript.source === "copilot-transcript" && apiTranscript.foregroundUnchanged;
+    expect(apiGeneration && apiGeneration()).toBe(true);
     if (initial.cursor === undefined) throw new Error("API fixture conversation has no cursor");
     expect(initial.turns[0]?.parts[0]?.text).toBe("API session A");
     expect((await read()).history_id).toBe(initial.history_id);
@@ -384,6 +387,7 @@ it.skipIf(process.platform !== "linux")("reads the live API without a report, fo
       seq: Date.now() * 1000, agent_session_id: first });
     await command(current, pid, `:api-switch ${second}`);
     const switched = await read();
+    expect(apiGeneration && apiGeneration()).toBe(false);
     expect(switched.turns[0]?.parts[0]?.text).toBe("API session B");
     expect(switched.history_id).not.toBe(initial.history_id);
     expect((await fetch(`${url}&from=${encodeURIComponent(initial.cursor)}`)).status).toBe(409);
@@ -761,6 +765,9 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
       }
     };
     const initial = await waitForTranscript(resumed);
+    const logTranscript = await paneTranscript(current);
+    const logGeneration = logTranscript.source === "copilot-transcript" && logTranscript.foregroundUnchanged;
+    expect(logGeneration && logGeneration()).toBe(true);
     expect(initial.source).toBe("copilot-transcript");
     expect(initial.turns[0]?.parts[0]?.text).toBe(resumed);
     expect(initial.history_id).not.toStartWith("unwritten:");
@@ -793,6 +800,7 @@ it.skipIf(process.platform !== "linux")("reads a resumed CLI without marker or r
       seq: Date.now() * 1000, agent_session_id: resumed });
     await herdrRpc("pane.send_text", { pane_id: current, text: `:hold ${resumed}\n:hold ${forked}\n:switch ${forked}\n` });
     await waitForTranscript(forked);
+    expect(logGeneration && logGeneration()).toBe(false);
     expect((await fetch(`${url}&from=${encodeURIComponent(initial.cursor ?? initial.history_id!)}`)).status).toBe(409);
     const staleTool = new URLSearchParams({ pane_id: current, ref: `call-${resumed}` });
     expect((await fetch(`http://127.0.0.1:${app.port}/api/pane/conversation/tool-output?${staleTool}`)).status).toBe(404);

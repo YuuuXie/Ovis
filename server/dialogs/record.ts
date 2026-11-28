@@ -11,6 +11,7 @@ export interface RecordRequest {
   readonly command: string;
   unchanged?: () => boolean;
   stillForeground?: () => Promise<boolean>;
+  foregroundUnchanged?: () => boolean;
 }
 
 /**

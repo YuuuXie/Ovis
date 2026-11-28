@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { observeCopilotForeground } from "./copilot-foreground-prototype.ts";
 import * as processOwner from "../server/process-owner.ts";
-import { COPILOT_RPC_TIMEOUT_MS, forgetCopilotForeground, readCopilotForeground } from "../server/copilot-foreground.ts";
+import { COPILOT_RPC_TIMEOUT_MS, copilotSelectionUnchanged, forgetCopilotForeground, readCopilotForeground } from "../server/copilot-foreground.ts";
 
 const first = "12aa83d8-48bc-41f2-a498-7055c5c44a01";
 const second = "12aa83d8-48bc-41f2-a498-7055c5c44a02";
@@ -142,10 +142,14 @@ linux("keeps a binding while unchanged but invalidates it after an unqueried swi
   try {
     const original = await readCopilotForeground(test.pid);
     expect(original.state).toBe("selected");
+    if (original.state !== "selected") throw new Error("expected selected session");
+    const unchanged = () => copilotSelectionUnchanged(test.pid, original.sessionId, original.binding);
+    expect(unchanged()).toBe(true);
     expect(await readCopilotForeground(test.pid)).toEqual(original);
     await test.notify("session.background");
     await test.notify("session.foreground");
     const returned = await readCopilotForeground(test.pid);
+    expect(unchanged()).toBe(false);
     expect(returned).toMatchObject({ state: "selected", sessionId: first });
     expect(returned).not.toEqual(original);
     expect(await readCopilotForeground(test.pid)).toEqual(returned);

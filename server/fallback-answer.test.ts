@@ -71,7 +71,7 @@ test.each([false, true])("answers a Copilot option only while the same ask_user 
   const screen = recorded("copilot-1.0.109-ask-32s");
   let id = "session\0first";
   const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
-    source === "copilot-question" ? { id, command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => !replaced || id.endsWith("first"), stillForeground: async () => true } : null);
+    source === "copilot-question" ? { id, command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => !replaced || id.endsWith("first"), stillForeground: async () => true, foregroundUnchanged: () => true } : null);
   try {
     await withPane("copilot", "blocked", screen, async pane => {
       const prompt = (await card())!;
@@ -95,7 +95,7 @@ test.each(["cursor", "completion", "foreground", "post-lookup-cursor", "post-loo
   const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) => {
     const found = binding;
     return source === "copilot-question" && open ? { id: `${binding}\0ask`, command: JSON.stringify(["Which color?", ["red", "blue"]]),
-      unchanged: () => open, stillForeground: async () => binding === found } : null;
+      unchanged: () => open, stillForeground: async () => binding === found, foregroundUnchanged: () => binding === found } : null;
   });
   try {
     await withPane("copilot", "blocked", screen, async pane => {
@@ -116,14 +116,41 @@ test.each(["cursor", "completion", "foreground", "post-lookup-cursor", "post-loo
   } finally { calls.mockRestore(); }
 });
 
-test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "switch-move", "switch-paste", "switch-enter"] as const)("checks the Copilot Other editor before committing its text: %s", async outcome => {
+test.each(["cursor", "options", "question", "identical-replacement", "no-generation"] as const)("refuses Enter if the connected Copilot lookup cannot confirm the selected panel: %s", async change => {
+  const screen = recorded("copilot-1.0.109-ask-32s");
+  await withPane("copilot", "blocked", screen, async pane => {
+    let unchanged = true;
+    const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
+      source !== "copilot-question" ? null : { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => true,
+        foregroundUnchanged: change === "no-generation" ? undefined : () => unchanged,
+        stillForeground: async () => {
+          await Promise.resolve();
+          if (change === "cursor") pane.screen = screen.replace(" ❯ red", "   red").replace("   blue", " ❯ blue");
+          if (change === "options") pane.screen = screen.replace("   blue", "   green");
+          if (change === "question") pane.screen = screen.replace("\n Which color?", "\n Which one?");
+          if (change === "identical-replacement") pane.onRead = () => { unchanged = false; };
+          return true;
+        } });
+    try {
+      expect((await answer((await card())!.id, { option_index: 0 })).status).toBe(409);
+      expect(pane.sent).toEqual([]);
+    } finally { calls.mockRestore(); }
+  });
+});
+
+test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "switch-move", "switch-paste", "switch-enter", "connected-paste-draft", "connected-enter-draft"] as const)("checks the Copilot Other editor before committing its text: %s", async outcome => {
   const screen = recorded("copilot-1.0.109-ask-32s");
   let open = true;
   let sent: string[] = [];
+  let edited = false;
   const switchAfter = outcome === "switch-move" ? 0 : outcome === "switch-paste" ? 2 : outcome === "switch-enter" ? 3 : undefined;
   const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
     source === "copilot-question" && open ? { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => open,
-      stillForeground: async () => sent.length !== switchAfter } : null);
+      foregroundUnchanged: () => true, stillForeground: async () => {
+        await Promise.resolve();
+        if (outcome === "connected-paste-draft" && sent.length === 2 || outcome === "connected-enter-draft" && sent.length === 3) edited = true;
+        return sent.length !== switchAfter;
+      } } : null);
   try {
     await withPane("copilot", "blocked", screen, async pane => {
       sent = pane.sent;
@@ -141,7 +168,7 @@ test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "swit
         if (typed && outcome === "replace") open = false;
         const rule = "─".repeat(100);
         const lateDraft = outcome === "late-draft" && pasteReads > 0 && pasteReads++ >= 3;
-        const draft = outcome === "terminal-draft" || lateDraft ? "half finished" : typed ? "violet" : "Type your answer...";
+        const draft = edited && typed ? "violet " : outcome === "terminal-draft" || lateDraft || edited ? "half finished" : typed ? "violet" : "Type your answer...";
         pane.screen = typed && outcome === "dismiss" ? "❯ ordinary composer" : screen.trimEnd()
           .replace(" ❯ red", "   red").replace("   Other (type your answer)", " ❯ Other (type your answer below)")
           + `\n${rule}\n❯ ${draft}\n${rule}`;
@@ -150,7 +177,7 @@ test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "swit
       expect(pane.sent).toEqual([]);
       expect((await answer(prompt.id, { custom_text: "violet" }, undefined, beforeKey)).status).toBe(outcome === "submit" ? 200 : 409);
       expect(pane.sent).toEqual(outcome === "switch-move" ? [] : ["down", "down",
-        ...(outcome.endsWith("draft") || outcome === "switch-paste" ? [] : ["text:violet"]), ...(outcome === "submit" ? ["enter"] : [])]);
+        ...(outcome.endsWith("draft") && outcome !== "connected-enter-draft" || outcome === "switch-paste" ? [] : ["text:violet"]), ...(outcome === "submit" ? ["enter"] : [])]);
     });
   } finally { calls.mockRestore(); }
 });

@@ -1831,7 +1831,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (keyAgent === "codex" && parsedPrompt !== undefined && questionClosed(paneId, parsedPrompt)) throw new KeyRefused();
       };
       const verifyThenSend = async <T>(look: AbortSignal, guardUntil: number | null, readUntil: number,
-        same: (shown: ParsedPrompt | null, screen: string, settled: ParsedPrompt | null) => boolean, write: () => T,
+        same: (shown: ParsedPrompt | null, screen: string, settled: ParsedPrompt | null) => boolean, write: (shown: ParsedPrompt | null) => T,
         screenOnly: boolean | "editor" | "omp-form-draft" = false): Promise<T> => {
         const guarding = guardKey(body.pane_id, agent, look);
         guarding.catch(() => undefined);
@@ -1865,17 +1865,6 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (readsLive && request.signal.aborted) throw new KeyRefused();
         if (!read || read.inputUnverified || ((screenOnly === "editor" || refreshGjcScreen) && (!screen || read.suppressFallback))
           || Date.now() > readUntil || !same(shown, screen ?? "", settled)) throw new KeyRefused();
-        if (shown?.copilotAsk) {
-          // A foreground switch can leave both the old file and the drawn question unchanged.
-          const signal = AbortSignal.any([request.signal, AbortSignal.timeout(Math.max(0, readUntil - Date.now()))]);
-          const current = await untilAborted(recordRequest(body.pane_id, "copilot-question"), signal);
-          if (current?.id !== shown.copilotAsk.id || !shown.copilotAsk.unchanged?.()
-            || request.signal.aborted || Date.now() > readUntil) throw new KeyRefused();
-          const frame = await untilAborted(liveScreen(body.pane_id), signal);
-          const final = frame === undefined ? null : copilotQuestion(frame, current.id);
-          if (!final || final.id !== shown.id || final.selectedIndex !== shown.selectedIndex
-            || final.copilotDraft !== shown.copilotDraft || signal.aborted || !current.unchanged?.()) throw new KeyRefused();
-        }
         // a card showing its record's command goes to that request only: after the screen's last read, the record must
         // still hold it open, so another request that opened meanwhile with the same command takes none of its keys
         if (parsedPrompt?.record !== undefined && (await recordRequest(body.pane_id, agent))?.id !== parsedPrompt.record.id) throw new RecordChanged();
@@ -1897,7 +1886,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         // and a gjc ask call replaced in its session file during the final screen read takes no key or paste
         if (agent === "codex" && parsedPrompt !== undefined && questionClosed(body.pane_id, parsedPrompt)) throw new KeyRefused();
         if (parsedPrompt?.gjcCall !== undefined && !gjcCallStillOpenInFile(parsedPrompt.gjcCall)) throw new KeyRefused();
-        return write();
+        return write(shown);
       };
       // Next goes on to another question and never answers this one: not with an answer in the same body, and not
       // where the card has no supported move (OpenCode would take it as an answer).
@@ -2457,25 +2446,32 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           }
         };
         const sendStep = async (step: AnswerStep, move: boolean, more: boolean): Promise<void> => {
+          const readUntil = Date.now() + SETTLE_MS;
           const look = agent === "pi" ? deadline : AbortSignal.timeout(SETTLE_MS);
-          const write = async (): Promise<void> => {
+          const write = async (expected?: ParsedPrompt | null): Promise<void> => {
             const first = !move && !committed;
             if (!move) committed = true;
             // asked again right before herdr writes: a question known to have ended since the last read takes no committing
             // key (a move keeps its own cancellation boundaries)
-            const asked = (): boolean => asks() && !request.signal.aborted
-              && (!parsed.copilotAsk || parsed.copilotAsk.unchanged?.() === true)
-              && (parsed.gjcCall === undefined || gjcCallStillOpenInFile(parsed.gjcCall));
             const call = parsed.copilotAsk;
-            let foregroundRefused = false;
-            const guard = move && !call ? undefined : asked;
+            const asked = (): boolean => asks() && !request.signal.aborted
+              && (!call || (call.foregroundUnchanged?.() === true && call.unchanged?.() === true && Date.now() < readUntil))
+              && (parsed.gjcCall === undefined || gjcCallStillOpenInFile(parsed.gjcCall));
+            let confirmationRefused = false;
+            const guard = call ? () => {
+              confirmationRefused = !asked();
+              return !confirmationRefused;
+            } : move ? undefined : asked;
             const confirm = call ? async () => {
               // Connect (or a socket drain) can outlast the screen check. Resolve the pane again;
               // an identical panel and an untouched old transcript do not prove ownership.
               const signal = AbortSignal.any([look, request.signal]);
-              const current = !signal.aborted && call.stillForeground && await untilAborted(call.stillForeground(), signal);
-              foregroundRefused = !current || signal.aborted;
-              return !foregroundRefused;
+              const current = !signal.aborted && call.foregroundUnchanged && call.stillForeground && await untilAborted(call.stillForeground(), signal);
+              const frame = current && !signal.aborted ? await untilAborted(liveScreen(body.pane_id), signal) : undefined;
+              const final = frame === undefined ? null : copilotQuestion(frame, call.id);
+              confirmationRefused = !expected || !final || final.id !== expected.id || final.selectedIndex !== expected.selectedIndex
+                || final.copilotDraft !== expected.copilotDraft || JSON.stringify([final.question, final.options.map(o => o.label)]) !== call.command || signal.aborted;
+              return !confirmationRefused;
             } : undefined;
             try {
               if (step.keys) await paneSendKeys(body.pane_id, step.keys, undefined, guard, confirm);
@@ -2484,7 +2480,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
               // herdr was never reached, or the write was cancelled, so nothing was pressed: the card is still to be answered
               if (first && error instanceof HerdrError && (error.code === "connect_failed" || error.code === "cancelled")) committed = false;
               // the question ended while the write was on its way: nothing was pressed, and the card has changed
-              if (guard && error instanceof HerdrError && error.code === "cancelled" && (foregroundRefused || !asked())) throw new KeyRefused();
+              if (guard && error instanceof HerdrError && error.code === "cancelled" && (call ? confirmationRefused : !asked())) throw new KeyRefused();
               throw error;
             }
           };
@@ -2497,7 +2493,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           const ompEnter = responder === "omp-form" && step.keys?.[0] === KEY.enter;
           if (!committed || responder === "copilot-question" || responder === "omp-form" || togglesInPlace() || lettaTyping || typedEditor || gjcEditorPaste || codexNotesPaste) {
             const onCursor = !move && (step.keys?.every((key) => key === KEY.enter || key === KEY.space) ?? false);
-            const { written } = await verifyThenSend(look, guardUntil, Date.now() + SETTLE_MS,
+            const { written } = await verifyThenSend(look, guardUntil, readUntil,
               (shown, screen, settled) => {
                 if (responder === "codex-question" && (codexNotesPaste || typedEditor)) {
                   if (!asks() || request.signal.aborted) return false;
@@ -2533,7 +2529,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
                   return other ? other.ticked === customTyped && other.text === (ompDraft ?? "") : !customTyped;
                 }
                 return lettaTyping ? lettaSearchShown(shown, parsed, lettaSearch) : sameQuestion(shown, screen, onCursor, settled);
-              }, () => ({ written: write() }),
+              }, shown => ({ written: write(shown) }),
               ompEnter && customTyped ? "omp-form-draft" : typedEditor || gjcEditorPaste || codexNotesPaste ? "editor"
                 : interaction !== undefined || responder === "pi-question" || responder === "pi-confirm" || responder.startsWith("fallback"));
             await written;

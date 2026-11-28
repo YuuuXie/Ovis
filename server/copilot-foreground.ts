@@ -178,6 +178,11 @@ class ForegroundClient {
     if (this.failure !== null) throw this.failure;
   }
 
+  stillSelected(sessionId: string, binding: string): boolean {
+    return this.failure === null && !this.socket.destroyed && this.bytes.length === 0
+      && this.selected === sessionId && `${this.generation}:${this.revision}` === binding;
+  }
+
   private receive(chunk: Buffer): void {
     this.bytes = Buffer.concat([this.bytes, chunk]);
     if (this.bytes.length > MAX_MESSAGE + 8192) throw new Unavailable("malformed_rpc");
@@ -279,6 +284,11 @@ class ForegroundClient {
 export function forgetCopilotForeground(): void {
   for (const client of clients.values()) client.close();
   for (const client of activityClients.values()) client.close();
+}
+
+/** Invalidate a completed lookup if this same event stream changed or broke during the screen read. */
+export function copilotSelectionUnchanged(pid: number, sessionId: string, binding: string): boolean {
+  return clients.get(pid)?.stillSelected(sessionId, binding) === true;
 }
 
 /** Attach only to an already-enabled, process-owned endpoint; never launch a server or send control methods. */

@@ -72,8 +72,8 @@ import { windowsTableWatermark } from "./windows-processes.ts";
 import { withinRetentionBudget } from "./retention-budget.ts";
 import { forgetAllPiIndexes, forgetPiIndex, piAbandonedTurns, piBranchRecords, piBranchSegments } from "./pi-tree.ts";
 import { COPILOT_IMAGE_REF, copilotImage, copilotOffsetOutput, copilotOutput, copilotRootRecord, parseCopilotTranscript } from "./copilot.ts";
-import { copilotApiTranscript, copilotExplicitResume, copilotHandoffSession, copilotTranscriptFile, copilotUnwrittenSession, openCopilotFile, readCopilotProcessSession } from "./copilot-store.ts";
-import { forgetCopilotForeground, readCopilotForeground } from "./copilot-foreground.ts";
+import { copilotApiTranscript, copilotExplicitResume, copilotHandoffSession, copilotTerminalOwner, copilotTranscriptFile, copilotUnwrittenSession, openCopilotFile, readCopilotProcessSession } from "./copilot-store.ts";
+import { copilotSelectionUnchanged, forgetCopilotForeground, readCopilotForeground } from "./copilot-foreground.ts";
 import { claudeSetting, type MetadataFold, parseConversationMetadata } from "./conversation-metadata.ts";
 import { catalogVersion, piCatalogVersion } from "./pi-models.ts";
 import type { ToldMode, ToldSession } from "./approvals/hub.ts";
@@ -1878,7 +1878,15 @@ function toldStandsIn(resolution: ReturnType<typeof readCopilotProcessSession>, 
   return legacy && (selected === null || selected.sessionId === told) ? told : null;
 }
 
-async function copilotTranscriptPath(pane: HerdrPane, panes: readonly HerdrPane[], previousClaims?: ReadonlySet<string>, peerInfo?: Map<string, Awaited<ReturnType<typeof paneProcessInfo>> | null>): Promise<{ path: string; binding: string; peerClaims: ReadonlySet<string> }> {
+interface CopilotTranscriptBinding {
+  path: string;
+  binding: string;
+  peerClaims: ReadonlySet<string>;
+  /** Only a process-bound generation that can be checked without yielding may authorize terminal input. */
+  foregroundUnchanged?: () => boolean;
+}
+
+async function copilotTranscriptPath(pane: HerdrPane, panes: readonly HerdrPane[], previousClaims?: ReadonlySet<string>, peerInfo?: Map<string, Awaited<ReturnType<typeof paneProcessInfo>> | null>): Promise<CopilotTranscriptBinding> {
   const report = pane.agent_session;
   let peerClaims: Promise<ReadonlySet<string>> | undefined = previousClaims === undefined ? undefined : Promise.resolve(previousClaims);
   const gatherPeerClaims = async (): Promise<Set<string>> => {
@@ -1942,7 +1950,9 @@ async function copilotTranscriptPath(pane: HerdrPane, panes: readonly HerdrPane[
       if (current.state !== "selected" || current.binding !== api.binding || current.sessionId !== api.sessionId) {
         throw new ConversationUnavailable("no_session_path", undefined, "copilot_api_foreground_changed");
       }
-      return { path, binding: `api:${foreground.pid}:${api.binding}`, peerClaims: await peerClaims! };
+      const owner = copilotTerminalOwner(foreground.pid, info?.foreground_process_group_id, info?.tty);
+      return { path, binding: `api:${foreground.pid}:${api.binding}`, peerClaims: await peerClaims!,
+        foregroundUnchanged: () => owner() && copilotSelectionUnchanged(foreground.pid, api.sessionId, api.binding) };
     }
     if (api.diagnostic !== "not_opted_in") throw new ConversationUnavailable("no_session_path", undefined, `copilot_api_${api.diagnostic}`);
   }
@@ -1978,8 +1988,13 @@ async function copilotTranscriptPath(pane: HerdrPane, panes: readonly HerdrPane[
   const peerConflict = logged !== null && await claimedByPeer(logged.sessionId);
   if (logged !== null && !peerConflict) {
     const path = copilotTranscriptFile(logged.sessionId, selected);
-    if (path !== null && nodePath.basename(nodePath.dirname(path)) === logged.sessionId)
-      return { path, binding: `${foreground.pid}:${logged.generation}`, peerClaims: await peerClaims! };
+    if (path !== null && nodePath.basename(nodePath.dirname(path)) === logged.sessionId) {
+      const owner = copilotTerminalOwner(foreground.pid, info?.foreground_process_group_id, info?.tty);
+      return { path, binding: `${foreground.pid}:${logged.generation}`, peerClaims: await peerClaims!, foregroundUnchanged: () => {
+        const now = readCopilotProcessSession(environment, argv, foreground.pid).session;
+        return now?.logged === true && now.path === path && now.generation === logged.generation && owner();
+      } };
+    }
   }
   // a log with no lifecycle line (its API answered first, above): the session the hook of this very Copilot told, with
   // the transcript in its own store (toldStandsIn)
@@ -2019,7 +2034,7 @@ type ResolvedTranscript =
     claudeFile?: string;
     codexFile?: string; kimiOwner?: string; letta?: { store: string; agent: string; conversation: string } } & (
     | { source: Exclude<StreamSource, "copilot-transcript"> }
-    | { source: "copilot-transcript"; binding: string; peerClaims: ReadonlySet<string> }
+    | ({ source: "copilot-transcript" } & CopilotTranscriptBinding)
   ))
   | { source: "opencode-transcript"; path: string; session: string }
   | { source: "hermes-transcript"; path: string; sessionId: string }

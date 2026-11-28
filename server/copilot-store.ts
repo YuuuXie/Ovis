@@ -646,6 +646,21 @@ function linuxGroup(pid: number): LinuxGroup | null {
   } catch { return null; }
 }
 
+/** A session can remain selected in a process no longer taking input from the pane's terminal. */
+export function copilotTerminalOwner(pid: number, groupId: number | null | undefined, tty: string | null | undefined): () => boolean {
+  const before = linuxGroup(pid);
+  return () => {
+    if (!before || !groupId || before.group !== groupId || before.foreground !== groupId || before.terminal <= 0) return false;
+    const now = linuxGroup(pid);
+    if (now?.birth !== before.birth || now.group !== groupId || now.foreground !== groupId || now.terminal !== before.terminal) return false;
+    try {
+      const stdin = `/proc/${pid}/fd/0`;
+      const device = statSync(stdin);
+      return device.isCharacterDevice() && device.rdev === before.terminal && (!tty || realpathSync(stdin) === realpathSync(tty));
+    } catch { return false; }
+  };
+}
+
 function onlyOption(argv: readonly string[], name: string, expected: string): boolean {
   const values: string[] = [];
   for (let i = 1; i < argv.length; i++) {

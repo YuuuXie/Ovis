@@ -6,6 +6,9 @@ summaries. Reading Chat makes no model calls. When a live single-choice question
 foreground session's pending `ask_user` call, Chat lets you choose a named option or type a
 single-line answer under **Other**, if offered. If you already started typing in Terminal,
 finish there. Multi-field forms and approvals are not handled by this question card.
+Answer in Terminal if Chat cannot confirm the foreground terminal process and its session
+generation from the UI-server connection or the process's lifecycle log. A hook, session
+marker, or parent-to-child handoff can identify history without authorizing answer keys.
 macOS and Windows use Terminal.
 This reader supports existing panes; it does not add Copilot to the launch picker.
 

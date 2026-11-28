@@ -13,10 +13,11 @@ export const readers: readonly DialogReader[] = [{
 
 /** Match the whole live single-choice panel, not the same question quoted in a turn above the composer. */
 export function copilotQuestion(screen: string, call: string): ParsedPrompt | null {
-  const lines = screen.replace(ANSI_RE, "").trimEnd().split(/\r?\n/).map(line => line.trimEnd());
+  const raw = screen.replace(ANSI_RE, "").trimEnd().split(/\r?\n/);
+  const lines = raw.map(line => line.trimEnd());
   let draft: string | undefined;
   if (SOLID_RULE_RE.test(lines.at(-1)?.trim() ?? "") && lines.at(-2)?.startsWith("❯ ") && SOLID_RULE_RE.test(lines.at(-3)?.trim() ?? "")) {
-    const value = lines.at(-2)!.slice(2);
+    const value = raw.at(-2)!.slice(2);
     draft = value === copilotPlaceholder ? "" : value;
     lines.splice(-3);
   }
