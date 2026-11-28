@@ -19,13 +19,21 @@ test("a Copilot question follows its foreground binding and file generation, not
   const start = JSON.stringify({ type: "tool.execution_start", data: { toolCallId: "pick", toolName: "ask_user",
     arguments: { message: "Pick", requestedSchema: { properties: { color: { type: "string", enum: ["red", "blue"] } } } } } }) + "\n";
   let binding = "first-pid";
-  const lookup = spyOn(conversation, "paneTranscript").mockImplementation(async () => ({ source: "copilot-transcript", path, binding, peerClaims: new Set<string>() }));
+  let foregroundPath = path;
+  const lookup = spyOn(conversation, "paneTranscript").mockImplementation(async () => ({ source: "copilot-transcript", path: foregroundPath, binding, peerClaims: new Set<string>() }));
   try {
     writeFileSync(path, start);
     const read = () => recordRequest("pane", "copilot-question");
     const first = (await read())!;
     expect(first.unchanged?.()).toBe(true);
+    expect(await first.stillForeground?.()).toBe(true);
+    foregroundPath = join(dir, "another.jsonl");
+    writeFileSync(foregroundPath, start);
+    expect(await first.stillForeground?.()).toBe(false);
+    foregroundPath = path;
     binding = "second-pid";
+    expect(await first.stillForeground?.()).toBe(false);
+    expect(first.unchanged?.()).toBe(true);
     const next = (await read())!;
     expect(next.id).not.toBe(first.id);
     writeFileSync(join(dir, "replacement"), start);

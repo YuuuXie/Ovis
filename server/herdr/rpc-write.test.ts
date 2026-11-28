@@ -56,6 +56,25 @@ it.each(["x", "🙂"])("delivers one complete large %s frame across real socket 
   } finally { await fixture.close(); }
 });
 
+it("waits for a connected guard and sends no bytes if authority changed", async () => {
+  const accepted = Promise.withResolvers<void>();
+  const ended = Promise.withResolvers<void>();
+  let received = 0;
+  const fixture = await peer((socket) => {
+    socket.on("data", chunk => { received += chunk.length; });
+    socket.on("end", () => ended.resolve());
+    accepted.resolve();
+  });
+  try {
+    const guard = async () => { await accepted.promise; return false; };
+    const error = await herdrRpc("fixture.write", {}, fixture.path, 2_000, undefined, guard).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(HerdrError);
+    expect((error as HerdrError).code).toBe("cancelled");
+    await ended.promise;
+    expect(received).toBe(0);
+  } finally { await fixture.close(); }
+});
+
 it("cuts a request short, never completing it, when the sender loses the right to send mid-request", async () => {
   const frame = 8 * 1024 * 1024;
   const chunks: Buffer[] = [];

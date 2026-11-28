@@ -205,7 +205,8 @@ function readReply(frame: unknown, id: string): Reply | string {
  *
  * `guard`, when given, is asked before every write of the request (a large one goes out over
  * several drains): the connect is awaited, and a caller's right to send can lapse meanwhile. A
- * guard that answers false before the first byte sends nothing and rejects with `cancelled`;
+ * foreground `confirm`, when needed, is awaited on the connected socket before the synchronous guard.
+ * A guard that answers false before the first byte sends nothing and rejects with `cancelled`;
  * one that answers false mid-request ends the connection with the request cut short, which
  * herdr cannot act on, and rejects with `socket_error`.
  */
@@ -215,6 +216,7 @@ export function herdrRpc<M extends HerdrMethod>(
   socketPath?: string,
   timeoutMs?: number,
   guard?: () => boolean,
+  confirm?: () => Promise<boolean>,
 ): Promise<HerdrMethods[M]["result"]>;
 /**
  * Untyped fallback for a method `HerdrMethods` does not list yet. Outside server/herdr/ only
@@ -231,6 +233,7 @@ export function herdrRpc<T = unknown, M extends string = string>(
   socketPath?: string,
   timeoutMs?: number,
   guard?: () => boolean,
+  confirm?: () => Promise<boolean>,
 ): Promise<T>;
 export async function herdrRpc(
   method: string,
@@ -238,6 +241,7 @@ export async function herdrRpc(
   socketPath: string = herdrSocketPath(),
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
   guard?: () => boolean,
+  confirm?: () => Promise<boolean>,
 ): Promise<unknown> {
   if (rpcCounts) rpcCounts.set(method, (rpcCounts.get(method) ?? 0) + 1);
   const id = nextId();
@@ -300,14 +304,18 @@ export async function herdrRpc(
       const onData = makeLineReader(limit, handleLine, (bytes) => invalid(`over the ${limit}-byte line limit`, bytes));
       const connectFailed = (err: Error) => finish(() =>
         reject(new HerdrError("connect_failed", `cannot reach herdr at ${socketPath}: ${err.message}`)));
-      const writeRequest = () => {
-        if (settled || socket === null || request !== null && written === request.length) return;
+      let writing = false;
+      const writeRequest = async () => {
+        if (writing || settled || socket === null || request !== null && written === request.length) return;
+        writing = true;
         try {
           // The sender's authority is asked before every write. Before the first byte a revoked
           // sender cancels. Once a frame has started it is never changed or replayed; if authority
           // lapses mid-frame the connection ends with the frame cut short, which herdr cannot act
           // on, and the outcome is reported as uncertain rather than as not sent
-          if (guard && !guard()) {
+          const confirmed = confirm ? await confirm() : true;
+          if (settled) return;
+          if (!confirmed || (guard && !guard())) {
             finish(() => reject(written === 0
               ? new HerdrError("cancelled", `herdr ${method} was not sent: the sender may no longer send`)
               : new HerdrError("socket_error", `herdr ${method} was cut short: the sender lost the right to send mid-request`)));
@@ -326,6 +334,8 @@ export async function herdrRpc(
           // A connected failure must not be mistaken for proof that no request was sent:
           // prompt answers treat connect_failed as permission to retry the same asking.
           finish(() => reject(new HerdrError("socket_error", (error as Error)?.message ?? "herdr socket error")));
+        } finally {
+          writing = false;
         }
       };
 
@@ -808,8 +818,8 @@ export async function agentGet(paneId: string, socketPath?: string): Promise<Age
   return (await herdrRpc("agent.get", { target: paneId }, socketPath)).agent;
 }
 
-export async function paneSendText(paneId: string, text: string, socketPath?: string, guard?: () => boolean): Promise<void> {
-  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath, undefined, guard);
+export async function paneSendText(paneId: string, text: string, socketPath?: string, guard?: () => boolean, confirm?: () => Promise<boolean>): Promise<void> {
+  await herdrRpc("pane.send_text", { pane_id: paneId, text }, socketPath, undefined, guard, confirm);
 }
 
 /**
@@ -822,8 +832,8 @@ export async function agentPrompt(target: string, text: string, socketPath?: str
   await herdrRpc("agent.prompt", { target, text }, socketPath, undefined, guard);
 }
 
-export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string, guard?: () => boolean): Promise<void> {
-  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath, undefined, guard);
+export async function paneSendKeys(paneId: string, keys: string[], socketPath?: string, guard?: () => boolean, confirm?: () => Promise<boolean>): Promise<void> {
+  await herdrRpc("pane.send_keys", { pane_id: paneId, keys }, socketPath, undefined, guard, confirm);
 }
 
 export async function paneClose(paneId: string, socketPath?: string): Promise<void> {

@@ -2457,6 +2457,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           }
         };
         const sendStep = async (step: AnswerStep, move: boolean, more: boolean): Promise<void> => {
+          const look = agent === "pi" ? deadline : AbortSignal.timeout(SETTLE_MS);
           const write = async (): Promise<void> => {
             const first = !move && !committed;
             if (!move) committed = true;
@@ -2465,19 +2466,28 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             const asked = (): boolean => asks() && !request.signal.aborted
               && (!parsed.copilotAsk || parsed.copilotAsk.unchanged?.() === true)
               && (parsed.gjcCall === undefined || gjcCallStillOpenInFile(parsed.gjcCall));
-            const guard = move && !parsed.copilotAsk ? undefined : asked;
+            const call = parsed.copilotAsk;
+            let foregroundRefused = false;
+            const guard = move && !call ? undefined : asked;
+            const confirm = call ? async () => {
+              // Connect (or a socket drain) can outlast the screen check. Resolve the pane again;
+              // an identical panel and an untouched old transcript do not prove ownership.
+              const signal = AbortSignal.any([look, request.signal]);
+              const current = !signal.aborted && call.stillForeground && await untilAborted(call.stillForeground(), signal);
+              foregroundRefused = !current || signal.aborted;
+              return !foregroundRefused;
+            } : undefined;
             try {
-              if (step.keys) await paneSendKeys(body.pane_id, step.keys, undefined, guard);
-              else if (step.text !== undefined) await paneSendText(body.pane_id, step.text, undefined, guard);
+              if (step.keys) await paneSendKeys(body.pane_id, step.keys, undefined, guard, confirm);
+              else if (step.text !== undefined) await paneSendText(body.pane_id, step.text, undefined, guard, confirm);
             } catch (error) {
               // herdr was never reached, or the write was cancelled, so nothing was pressed: the card is still to be answered
               if (first && error instanceof HerdrError && (error.code === "connect_failed" || error.code === "cancelled")) committed = false;
               // the question ended while the write was on its way: nothing was pressed, and the card has changed
-              if (guard && error instanceof HerdrError && error.code === "cancelled" && !asked()) throw new KeyRefused();
+              if (guard && error instanceof HerdrError && error.code === "cancelled" && (foregroundRefused || !asked())) throw new KeyRefused();
               throw error;
             }
           };
-          const look = agent === "pi" ? deadline : AbortSignal.timeout(SETTLE_MS);
           const guardUntil = agent === "pi" ? null : Date.now() + SETTLE_MS;
           const lettaTyping = committed && responder === "letta-model" && body.custom_text !== undefined;
           const claudeDown = responder === "claude-question" && parsed.multi_select && step.keys?.[0] === KEY.down;

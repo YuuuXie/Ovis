@@ -69,7 +69,11 @@ const RECORDS: Readonly<Record<string, RecordSource>> = {
       return after?.dev === before.dev && after.ino === before.ino && after.ctimeNs === before.ctimeNs && after.size === before.size;
     };
     const call = within(identity, copilotAskRecord.pending(await tail(found.path)));
-    return call && unchanged() ? { ...call, unchanged } : null;
+    const stillForeground = async () => {
+      const current = await paneTranscript(paneId);
+      return current.source === "copilot-transcript" && current.path === found.path && current.binding === found.binding;
+    };
+    return call && unchanged() ? { ...call, unchanged, stillForeground } : null;
   } },
   // the local backend's messages, which Letta appends to as the turn goes; its transcript waits for the turn's end
   letta: sessionFile(lettaRecord, (found) => found.source === "letta-transcript" && found.letta ? lettaMessagesPath(found.letta.store, found.letta.agent, found.letta.conversation) : null),

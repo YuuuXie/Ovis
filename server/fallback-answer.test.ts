@@ -71,7 +71,7 @@ test.each([false, true])("answers a Copilot option only while the same ask_user 
   const screen = recorded("copilot-1.0.109-ask-32s");
   let id = "session\0first";
   const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
-    source === "copilot-question" ? { id, command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => !replaced || id.endsWith("first") } : null);
+    source === "copilot-question" ? { id, command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => !replaced || id.endsWith("first"), stillForeground: async () => true } : null);
   try {
     await withPane("copilot", "blocked", screen, async pane => {
       const prompt = (await card())!;
@@ -88,21 +88,24 @@ test.each([false, true])("answers a Copilot option only while the same ask_user 
   } finally { calls.mockRestore(); }
 });
 
-test.each(["cursor", "completion", "foreground", "post-lookup-cursor"] as const)("rejects a Copilot %s change during the last screen read before Enter", async change => {
+test.each(["cursor", "completion", "foreground", "post-lookup-cursor", "post-lookup-foreground"] as const)("rejects a Copilot %s change during the last screen read before Enter", async change => {
   const screen = recorded("copilot-1.0.109-ask-32s");
   let open = true;
   let binding = "first";
-  const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
-    source === "copilot-question" && open ? { id: `${binding}\0ask`, command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => open } : null);
+  const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) => {
+    const found = binding;
+    return source === "copilot-question" && open ? { id: `${binding}\0ask`, command: JSON.stringify(["Which color?", ["red", "blue"]]),
+      unchanged: () => open, stillForeground: async () => binding === found } : null;
+  });
   try {
     await withPane("copilot", "blocked", screen, async pane => {
       const prompt = (await card())!;
       let reads = 0;
       const beforeKey = async () => {
         pane.onRead = () => {
-          if (++reads !== (change === "post-lookup-cursor" ? 4 : 3)) return;
+          if (++reads !== (change.startsWith("post-lookup-") ? 4 : 3)) return;
           if (change === "completion") open = false;
-          else if (change === "foreground") binding = "second";
+          else if (change.endsWith("foreground")) binding = "second";
           else pane.screen = screen.replace(" ❯ red", "   red").replace("   blue", " ❯ blue");
         };
       };
@@ -113,13 +116,17 @@ test.each(["cursor", "completion", "foreground", "post-lookup-cursor"] as const)
   } finally { calls.mockRestore(); }
 });
 
-test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft"] as const)("checks the Copilot Other editor before committing its text: %s", async outcome => {
+test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "switch-move", "switch-paste", "switch-enter"] as const)("checks the Copilot Other editor before committing its text: %s", async outcome => {
   const screen = recorded("copilot-1.0.109-ask-32s");
   let open = true;
+  let sent: string[] = [];
+  const switchAfter = outcome === "switch-move" ? 0 : outcome === "switch-paste" ? 2 : outcome === "switch-enter" ? 3 : undefined;
   const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
-    source === "copilot-question" && open ? { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => open } : null);
+    source === "copilot-question" && open ? { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => open,
+      stillForeground: async () => sent.length !== switchAfter } : null);
   try {
     await withPane("copilot", "blocked", screen, async pane => {
+      sent = pane.sent;
       const prompt = (await card())!;
       expect(prompt.custom_option_index).toBe(2);
       let pasteReads = 0;
@@ -142,7 +149,8 @@ test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft"] as co
       expect((await answer(prompt.id, { custom_text: "violet\nother" })).status).toBe(400);
       expect(pane.sent).toEqual([]);
       expect((await answer(prompt.id, { custom_text: "violet" }, undefined, beforeKey)).status).toBe(outcome === "submit" ? 200 : 409);
-      expect(pane.sent).toEqual(["down", "down", ...(outcome.endsWith("draft") ? [] : ["text:violet"]), ...(outcome === "submit" ? ["enter"] : [])]);
+      expect(pane.sent).toEqual(outcome === "switch-move" ? [] : ["down", "down",
+        ...(outcome.endsWith("draft") || outcome === "switch-paste" ? [] : ["text:violet"]), ...(outcome === "submit" ? ["enter"] : [])]);
     });
   } finally { calls.mockRestore(); }
 });
