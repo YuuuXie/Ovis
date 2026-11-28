@@ -30,7 +30,7 @@ import { opencodeSessionId } from "./opencode.ts";
 import { agentPickerWaits, registry, SCREEN_READ_AGENTS } from "./dialogs/registry.ts";
 import { ANSI_RE, type AnswerStep, KEY, type OmoAsk, type ParsedPrompt, type PromptDraft, cleanLine, findLastIndex, finishPrompt, isDivider, keySteps, navigationKeys, own, parsedByPublicPrompt, publicPrompt } from "./dialogs/shared.ts";
 import { executeInteractionPlan } from "./dialogs/interaction-plan.ts";
-import { copilotPlaceholder, copilotQuestion } from "./dialogs/copilot-question.ts";
+import { copilotQuestion } from "./dialogs/copilot-question.ts";
 import { liveScreen, parsePrompt, promptTailIsActive } from "./dialogs/live.ts";
 import { LETTA_SEARCH_MAX, lettaPick, lettaSearchShown } from "./dialogs/letta.ts";
 import { agyCustomEditorMatches, agySameQuestion, parseAgyQuestion } from "./dialogs/agy.ts";
@@ -506,7 +506,7 @@ export function parseInteractivePrompt(agent: string, screen: string, omoAsk: Om
 class InvalidAnswer extends Error {}
 
 const singleLineInlineEditor = (responder: ParsedPrompt["responder"]): boolean =>
-  responder === "pi-ask-question" || responder === "pi-questionnaire-question" || responder === "copilot-question";
+  responder === "pi-ask-question" || responder === "pi-questionnaire-question";
 
 export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer, "option_index" | "option_indices" | "custom_text">): AnswerStep[] {
   const parsed = parsedByPublicPrompt.get(prompt);
@@ -518,9 +518,6 @@ export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer,
 
   if (answer.custom_text !== undefined) {
     if (typeof answer.custom_text !== "string") throw new InvalidAnswer("Custom text must be a string.");
-    if (parsed.responder === "copilot-question" && answer.custom_text.trim() === copilotPlaceholder) {
-      throw new InvalidAnswer("Use a single line of plain text for this Copilot question.");
-    }
     // A raw newline/control in rpiv's inline input can submit it and type into the next
     // question, review, or composer. Validate before trimming and before any navigation.
     if (singleLineInlineEditor(parsed.responder) && /[\u0000-\u001f\u007f-\u009f]/.test(answer.custom_text)) {
@@ -567,7 +564,7 @@ export function answerKeys(prompt: InteractivePrompt, answer: Pick<PromptAnswer,
     // dialog is the same but for a worse reason: its `>` line already owns the input, so an
     // enter typed before the answer submits the dialog empty and leaves the answer behind to
     // be typed into the agent's own prompt.
-    if (!["claude-question", "claude-plan", "codex-question", "codex-async-question", "copilot-question", "pi-input"].includes(parsed.responder)) navigation.push(KEY.enter);
+    if (!["claude-question", "claude-plan", "codex-question", "codex-async-question", "pi-input"].includes(parsed.responder)) navigation.push(KEY.enter);
     if (parsed.responder === "codex-question") navigation.push(KEY.tab);
     // what was typed into pi's line in the terminal would stay around the answer: the line is
     // emptied first, after the cursor and before it (pi's editor keys, measured on 0.87.1)
@@ -1814,7 +1811,6 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       waitedOn = waitingKindOf(prompt) !== undefined;
 
       const parsedPrompt = parsedByPublicPrompt.get(prompt);
-      if (parsedPrompt?.copilotDraft) return promptChanged();
       // before each key: the look the key needs (beforeKey), then, for an omp card read under an open ask call, that
       // call is still the pane's one open call: omp asking again since the last read takes none of this card's keys
       const ompCall = agent === "omp" ? parsedPrompt?.ompCall : undefined;
@@ -2431,8 +2427,6 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         }
         const inlineEditorMatches = (shown: ParsedPrompt | null, screen: string, draft: string): boolean => {
           switch (responder) {
-            case "copilot-question":
-              return shown?.id === parsed.id && shown.copilotDraft === draft;
             case "pi-questionnaire-question":
               return shown?.id === parsed.id && shown.selectedIndex === parsed.customMenuIndex && piQuestionnaireInputMatches(shown, draft);
             case "pi-ask-question":
@@ -2470,7 +2464,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
               const frame = current && !signal.aborted ? await untilAborted(liveScreen(body.pane_id), signal) : undefined;
               const final = frame === undefined ? null : copilotQuestion(frame, call.id);
               confirmationRefused = !expected || !final || final.id !== expected.id || final.selectedIndex !== expected.selectedIndex
-                || final.copilotDraft !== expected.copilotDraft || JSON.stringify([final.question, final.options.map(o => o.label)]) !== call.command || signal.aborted;
+                || JSON.stringify([final.question, final.options.map(o => o.label)]) !== call.command || signal.aborted;
               return !confirmationRefused;
             } : undefined;
             try {
@@ -2514,8 +2508,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
                   return shown?.agent === parsed.agent && shown.customEditorMatches?.(typedEditor, claudeDown ? "editor" : "submit") === true;
                 }
                 if (responder === "copilot-question") {
-                  if (shown?.id !== parsed.id || shown.selectedIndex !== cursor || settled?.selectedIndex !== cursor || settled.copilotDraft !== shown.copilotDraft) return false;
-                  return step.text !== undefined ? shown.copilotDraft === "" : !shown.copilotDraft;
+                  return step.keys !== undefined && shown?.id === parsed.id && shown.selectedIndex === cursor && settled?.selectedIndex === cursor;
                 }
                 // The open call only identifies the form: Tab or Esc in the terminal can hand focus elsewhere mid-answer.
                 if (responder === "omp-form" && (committed || ompEnter && ompChecks !== null)) {

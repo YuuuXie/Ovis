@@ -1,3 +1,3 @@
 ### Added
-- On Linux, answer a live Copilot single-choice question from Chat, including a custom answer
-  when the question offers **Other**.
+- On Linux, choose a named answer to a live Copilot single-choice question from Chat.
+  Answer **Other** in Terminal.

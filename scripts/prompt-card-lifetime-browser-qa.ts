@@ -71,19 +71,18 @@ try {
   };
 
   await scenario("Copilot live questions", async () => {
-    const project = (id: string, text: string, editing = false) => {
+    const project = (id: string, text: string) => {
       const rule = "─".repeat(60);
       const screen = [rule, " Copilot needs information.", ` ${text}`, "", " Choose one:",
-        editing ? "   Blue" : " ❯ Blue", "   Green", editing ? " ❯ Other (type your answer below)" : "   Other (type your answer)", "",
-        " ↑/↓ select · enter accept · ctrl+d decline · esc cancel", rule,
-        ...(editing ? [rule, "❯ Type your answer...", rule] : [])].join("\n");
+        " ❯ Blue", "   Green", "   Other (type your answer)", "",
+        " ↑/↓ select · enter accept · ctrl+d decline · esc cancel", rule].join("\n");
       const parsed = copilotQuestion(screen, id);
       assert.ok(parsed, "real reader recognizes the synthetic native panel");
       return publicPrompt(parsed);
     };
     const first = project("call-1", "Which color?");
     const stale = project("call-2", "Which old color?");
-    const replacement = project("call-3", "Which replacement color?", true);
+    const replacement = project("call-3", "Which replacement color?");
     answer = { prompt: first };
     const { page, close, errors } = await open("?agent=copilot");
     try {
@@ -101,13 +100,13 @@ try {
       const shown = card(page), green = shown.getByRole("button", { name: /Green/ });
       const custom = shown.locator(".prompt-card-custom input");
       await shown.getByText(first.question!).waitFor();
+      assert.equal(await custom.count(), 0, "Other stays in Terminal");
       await green.click();
       await shown.getByText(stale.question!).waitFor();
       await green.click();
       await shown.getByText(replacement.question!).waitFor();
-      assert.equal(await custom.inputValue(), "");
-      await custom.fill("violet with gold");
-      await custom.press("Enter");
+      assert.equal(await custom.count(), 0);
+      await shown.getByRole("button", { name: /Blue/ }).click();
       await shown.waitFor({ state: "detached" });
       await unmount(page);
       await setChat(page, { mounted: true });
@@ -116,10 +115,10 @@ try {
       assert.deepEqual(posts, [
         { pane_id: "w1:p1", prompt_id: first.id, option_index: 1 },
         { pane_id: "w1:p1", prompt_id: stale.id, option_index: 1 },
-        { pane_id: "w1:p1", prompt_id: replacement.id, custom_text: "violet with gold" },
+        { pane_id: "w1:p1", prompt_id: replacement.id, option_index: 0 },
       ], "only explicit card actions POST; no answer replay on replacement or remount");
       assert.deepEqual(errors, []);
-      console.log("PASS Copilot Chat card: Green (index 1), stale answer refused, custom text on replacement; exactly 3 POSTs after remount and polling");
+      console.log("PASS Copilot Chat card: named choices only, stale answer refused; exactly 3 POSTs after remount and polling");
     } finally { await close(); }
   });
 

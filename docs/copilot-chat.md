@@ -3,9 +3,10 @@
 On Linux, Chat reads Copilot CLI's native `events.jsonl`: user and assistant text,
 tool activity, recorded model/effort, recorded `ask_user` choices and Autopilot completion
 summaries. Reading Chat makes no model calls. When a live single-choice question matches the
-foreground session's pending `ask_user` call, Chat lets you choose a named option or type a
-single-line answer under **Other**, if offered. If you already started typing in Terminal,
-finish there. Multi-field forms and approvals are not handled by this question card.
+foreground session's pending `ask_user` call, Chat lets you choose a named option.
+Use Terminal for **Other**: an empty editor and the typed words `Type your answer...` can
+look identical. Chat neither pastes into that editor nor submits it. Multi-field forms
+and approvals are not handled by this question card.
 Answer in Terminal if Chat cannot confirm the foreground terminal process and its session
 generation from the UI-server connection or the process's lifecycle log. A hook, session
 marker, or parent-to-child handoff can identify history without authorizing answer keys.

@@ -116,7 +116,7 @@ test.each(["cursor", "completion", "foreground", "post-lookup-cursor", "post-loo
   } finally { calls.mockRestore(); }
 });
 
-test.each(["cursor", "options", "question", "identical-replacement", "no-generation"] as const)("refuses Enter if the connected Copilot lookup cannot confirm the selected panel: %s", async change => {
+test.each(["cursor", "options", "question", "identical-replacement", "move-identical-replacement", "no-generation"] as const)("refuses input if the connected Copilot lookup cannot confirm the selected panel: %s", async change => {
   const screen = recorded("copilot-1.0.109-ask-32s");
   await withPane("copilot", "blocked", screen, async pane => {
     let unchanged = true;
@@ -128,58 +128,45 @@ test.each(["cursor", "options", "question", "identical-replacement", "no-generat
           if (change === "cursor") pane.screen = screen.replace(" ❯ red", "   red").replace("   blue", " ❯ blue");
           if (change === "options") pane.screen = screen.replace("   blue", "   green");
           if (change === "question") pane.screen = screen.replace("\n Which color?", "\n Which one?");
-          if (change === "identical-replacement") pane.onRead = () => { unchanged = false; };
+          if (change.endsWith("identical-replacement")) pane.onRead = () => { unchanged = false; };
           return true;
         } });
     try {
-      expect((await answer((await card())!.id, { option_index: 0 })).status).toBe(409);
+      expect((await answer((await card())!.id, { option_index: change === "move-identical-replacement" ? 1 : 0 })).status).toBe(409);
       expect(pane.sent).toEqual([]);
     } finally { calls.mockRestore(); }
   });
 });
 
-test.each(["submit", "dismiss", "replace", "terminal-draft", "late-draft", "switch-move", "switch-paste", "switch-enter", "connected-paste-draft", "connected-enter-draft"] as const)("checks the Copilot Other editor before committing its text: %s", async outcome => {
+test.each(["", "Type your answer...", "half finished"])("leaves Copilot Other to Terminal, including a placeholder-shaped draft (buffer: %j)", async buffer => {
   const screen = recorded("copilot-1.0.109-ask-32s");
-  let open = true;
-  let sent: string[] = [];
-  let edited = false;
-  const switchAfter = outcome === "switch-move" ? 0 : outcome === "switch-paste" ? 2 : outcome === "switch-enter" ? 3 : undefined;
-  const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
-    source === "copilot-question" && open ? { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]), unchanged: () => open,
-      foregroundUnchanged: () => true, stillForeground: async () => {
-        await Promise.resolve();
-        if (outcome === "connected-paste-draft" && sent.length === 2 || outcome === "connected-enter-draft" && sent.length === 3) edited = true;
-        return sent.length !== switchAfter;
-      } } : null);
-  try {
-    await withPane("copilot", "blocked", screen, async pane => {
-      sent = pane.sent;
+  const rule = "─".repeat(100);
+  const editor = screen.trimEnd().replace(" ❯ red", "   red").replace("   Other (type your answer)", " ❯ Other (type your answer below)")
+    + `\n${rule}\n❯ ${buffer || "Type your answer..."}\n${rule}`;
+  await withPane("copilot", "blocked", screen, async pane => {
+    let confirmations = 0;
+    const calls = spyOn(recordCards, "recordRequest").mockImplementation(async (_pane, source) =>
+      source !== "copilot-question" ? null : { id: "session\0ask", command: JSON.stringify(["Which color?", ["red", "blue"]]),
+        unchanged: () => true, foregroundUnchanged: () => true, stillForeground: async () => {
+          await Promise.resolve();
+          confirmations++;
+          pane.screen = editor;
+          return true;
+        } });
+    try {
       const prompt = (await card())!;
-      expect(prompt.custom_option_index).toBe(2);
-      let pasteReads = 0;
-      const beforeKey = async () => {
-        if (pane.sent.join(",") === "down,down") pasteReads = 1;
-      };
-      pane.onRead = () => {
-        const moves = pane.sent.filter(key => key === "down").length;
-        if (moves === 1) pane.screen = screen.replace(" ❯ red", "   red").replace("   blue", " ❯ blue");
-        if (moves !== 2) return;
-        const typed = pane.sent.includes("text:violet");
-        if (typed && outcome === "replace") open = false;
-        const rule = "─".repeat(100);
-        const lateDraft = outcome === "late-draft" && pasteReads > 0 && pasteReads++ >= 3;
-        const draft = edited && typed ? "violet " : outcome === "terminal-draft" || lateDraft || edited ? "half finished" : typed ? "violet" : "Type your answer...";
-        pane.screen = typed && outcome === "dismiss" ? "❯ ordinary composer" : screen.trimEnd()
-          .replace(" ❯ red", "   red").replace("   Other (type your answer)", " ❯ Other (type your answer below)")
-          + `\n${rule}\n❯ ${draft}\n${rule}`;
-      };
-      expect((await answer(prompt.id, { custom_text: "violet\nother" })).status).toBe(400);
+      expect(labels(prompt)).toEqual(["red", "blue"]);
+      expect(prompt.custom_option_index).toBeNull();
+      expect((await answer(prompt.id, { custom_text: "violet" })).status).toBe(400);
+      expect((await answer(prompt.id, { option_index: 2 })).status).toBe(400);
+      expect(confirmations).toBe(0);
+      expect((await answer(prompt.id, { option_index: 0 })).status).toBe(409);
+      expect(confirmations).toBe(1);
+      expect(await card()).toBeNull(); // no fallback Enter or text box for an active editor
+      expect((await answer(prompt.id, { custom_text: "violet" })).status).toBe(409);
       expect(pane.sent).toEqual([]);
-      expect((await answer(prompt.id, { custom_text: "violet" }, undefined, beforeKey)).status).toBe(outcome === "submit" ? 200 : 409);
-      expect(pane.sent).toEqual(outcome === "switch-move" ? [] : ["down", "down",
-        ...(outcome.endsWith("draft") && outcome !== "connected-enter-draft" || outcome === "switch-paste" ? [] : ["text:violet"]), ...(outcome === "submit" ? ["enter"] : [])]);
-    });
-  } finally { calls.mockRestore(); }
+    } finally { calls.mockRestore(); }
+  });
 });
 
 test.each([
